@@ -1,0 +1,11 @@
+[package]
+name = "gen-unicode"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Pinned to the regex stack tiktoken-rs 0.12.0 resolves through fancy-regex, so the
+# generated classes match the reference tokenizer's Unicode tables exactly.
+[dependencies]
+regex = "=1.12.4"
+regex-syntax = "=0.8.11"

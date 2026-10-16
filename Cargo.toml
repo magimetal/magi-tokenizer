@@ -1,0 +1,29 @@
+[package]
+name = "magi-toks"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Exact, fast o200k_base BPE tokenizer with build-time tables and a hand-written pretokenizer"
+include = ["/src", "/build.rs", "/assets", "/LICENSE", "/NOTICE", "/README.md"]
+
+[lib]
+name = "magi_toks"
+
+[workspace]
+members = ["bench"]
+exclude = ["tools/gen-unicode"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+lto = "fat"
+codegen-units = 1
+
+# The build script parses the vocabulary and builds hash tables; optimize it so builds stay quick.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release.build-override]
+opt-level = 3

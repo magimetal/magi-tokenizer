@@ -175,10 +175,11 @@ Follow magi-code's conventions. At minimum:
 
 ```toml
 # magi-code Cargo.toml
-magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev = "<full commit hash>" }
+magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev = "c60b63e01f9f88571657126f9854298645badee6" }
 ```
 
-- Pin a full commit hash, not a branch. Commit `Cargo.lock`.
+- Pin a full commit hash, not a branch. Commit `Cargo.lock`. The hash above is the first pushed commit; the
+  library code in it is the code that `verify` checked. Use a later commit only if its `verify` run also passed.
 - `deny.toml` has `unknown-git = "deny"` and `allow-git = []`. Add this repository:
   `allow-git = ["https://github.com/magimetal/magi-tokenizer"]`.
 - The license is Apache-2.0, which `deny.toml` already allows. NOTICE includes the OpenAI MIT notice for the

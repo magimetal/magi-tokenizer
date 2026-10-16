@@ -11,6 +11,11 @@ include = ["/src", "/build.rs", "/assets", "/LICENSE", "/NOTICE", "/README.md"]
 [lib]
 name = "magi_tokenizer"
 
+[features]
+# Hooks for the bench/ differential harness (fallback counters, forced fallback, direct merge calls). Not a
+# stable API; consumers should not enable it.
+harness = []
+
 [workspace]
 members = ["bench"]
 exclude = ["tools/gen-unicode"]

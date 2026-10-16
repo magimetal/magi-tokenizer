@@ -41,6 +41,8 @@ pub(crate) fn count_piece(piece: &[u8]) -> usize {
     if piece.len() > SHORT_PIECE_BYTES {
         let mut count = 0;
         if !merge_in_windows(piece, |tokens| count += tokens.len()) {
+            #[cfg(feature = "harness")]
+            crate::harness::record_fallback(count);
             count = 0;
             merge_long_piece(piece, |_| count += 1);
         }
@@ -66,6 +68,8 @@ fn encode_short_piece(piece: &[u8], out: &mut Vec<u32>) {
 fn encode_long_piece(piece: &[u8], out: &mut Vec<u32>) {
     let base = out.len();
     if !merge_in_windows(piece, |tokens| out.extend_from_slice(tokens)) {
+        #[cfg(feature = "harness")]
+        crate::harness::record_fallback(out.len() - base);
         out.truncate(base);
         merge_long_piece(piece, |id| out.push(id));
     }
@@ -86,7 +90,7 @@ const COMMIT_BATCH_TOKENS: usize = 4096;
 ///
 /// Returns false when a stretch has no stitch point within MAX_WINDOW_BYTES. A prefix may already have been
 /// committed; the caller discards it and merges the whole piece instead.
-fn merge_in_windows(piece: &[u8], mut commit: impl FnMut(&[u32])) -> bool {
+pub(crate) fn merge_in_windows(piece: &[u8], mut commit: impl FnMut(&[u32])) -> bool {
     // Tokens not yet committed, with the end offset in `piece` of each. Only the stretch after a window's start is
     // ever replaced, and windows start at or after `committed_end`.
     let mut tokens: Vec<u32> = Vec::new();
@@ -95,7 +99,13 @@ fn merge_in_windows(piece: &[u8], mut commit: impl FnMut(&[u32])) -> bool {
     let mut cache: [MergedWindow; WINDOW_CACHE_SLOTS] = Default::default();
     let mut window_bytes = FIRST_WINDOW_BYTES;
     let mut done = 0;
+    #[cfg(feature = "harness")]
+    let mut stitches = 0;
     while done < piece.len() {
+        #[cfg(feature = "harness")]
+        if crate::harness::window_merge_forced_to_fail(stitches) {
+            return false;
+        }
         // Start the window where a token of the encoding so far starts: the window's merges then begin from the
         // same position, so its first tokens usually match and stitch immediately. Pending tokens all end after
         // `committed_end`, and it is at least REACH_BACK_BYTES behind, so it is the right start when none qualify.
@@ -134,6 +144,10 @@ fn merge_in_windows(piece: &[u8], mut commit: impl FnMut(&[u32])) -> bool {
             None => return false,
         }
         done = window.end;
+        #[cfg(feature = "harness")]
+        {
+            stitches += 1;
+        }
         // Hard stretches are local: go back to cheap windows once a stitch succeeds.
         window_bytes = FIRST_WINDOW_BYTES;
         if tokens.len() >= COMMIT_BATCH_TOKENS {
@@ -224,6 +238,17 @@ const LINKED_MERGE_BYTES: usize = 32;
 #[inline]
 fn merge_short_piece(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
     if piece.len() < LINKED_MERGE_BYTES { merge_by_shifting(piece, tokens) } else { merge_linked(piece, tokens) }
+}
+
+/// Stack merge alone, without the whole-token shortcut; None for pieces over SHORT_PIECE_BYTES.
+#[cfg(feature = "harness")]
+pub(crate) fn short_merge(piece: &[u8]) -> Option<Vec<u32>> {
+    if piece.len() > SHORT_PIECE_BYTES {
+        return None;
+    }
+    let mut tokens = [0u32; SHORT_PIECE_BYTES];
+    let count = merge_short_piece(piece, &mut tokens);
+    Some(tokens[..count].to_vec())
 }
 
 /// Keeps parts packed at the front: after each merge the parts and ranks above it shift down by one, so each
@@ -370,6 +395,18 @@ fn merge_long_piece(piece: &[u8], emit: impl FnMut(u32)) {
     } else {
         merge_parts::<usize>(piece, emit);
     }
+}
+
+/// Whole-piece heap merge with `u32` part indices, or `usize` ones when `wide_index` is set.
+#[cfg(feature = "harness")]
+pub(crate) fn heap_merge(piece: &[u8], wide_index: bool) -> Vec<u32> {
+    let mut tokens = Vec::new();
+    if wide_index {
+        merge_parts::<usize>(piece, |id| tokens.push(id));
+    } else {
+        merge_parts::<u32>(piece, |id| tokens.push(id));
+    }
+    tokens
 }
 
 fn merge_parts<I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u32)) {

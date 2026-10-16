@@ -4,6 +4,9 @@
 //! Tables are built at compile time, so there is no startup parsing and no global initialization.
 
 mod bpe;
+#[cfg(feature = "harness")]
+#[doc(hidden)]
+pub mod harness;
 mod scanner;
 mod table_hash;
 mod tables;

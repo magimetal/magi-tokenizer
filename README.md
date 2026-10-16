@@ -268,6 +268,20 @@ not measured including allocator overhead), usually a few KiB. The one exception
 needs memory proportional to the piece; when it runs, `encode_ordinary` removes the tokens it already appended
 for that piece.
 
+Measured peak RSS for one random `a`/`b` piece (`magi-tokenizer-bench memory`, ARM64 macOS, fallback forced through
+the `harness` feature):
+
+| Piece | `count` via windows | `count` via fallback | `encode` via windows | `encode` via fallback |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 MiB | 29 MiB, 0.3 s | 421 MiB, 3.3 s | 51 MiB, 0.3 s | 436 MiB, 3.1 s |
+| 64 MiB | 77 MiB, 1.1 s | 1,669 MiB, 16.7 s | 164 MiB, 1.1 s | 1,732 MiB, 17.1 s |
+| 256 MiB | 269 MiB, 4.5 s | 6,661 MiB, 88.6 s | 619 MiB, 4.4 s | 6,917 MiB, 85.5 s |
+
+RSS includes the input text (1 byte per piece byte). In these runs the fallback peaked at 26–27 bytes per piece
+byte with the input included, and took 11–20 times as long as windows, the gap growing with piece size. These are
+measured examples, not worst-case bounds. No text in the `verify` suites reaches the fallback unless forced (see
+below).
+
 The heap merge stays in the code as the fallback, and it merges windows over 128 bytes. It stores positions as
 `u32` and switches to `usize` for pieces of 4 GiB or more.
 
@@ -279,10 +293,24 @@ regex, run through `fancy-regex` 0.17.0. For every text it checks:
 - the pieces, against the reference regex;
 - `encode_ordinary` IDs and `count_ordinary`;
 - `decode` round trip;
-- `encode_with_special_tokens` IDs and `count_with_special_tokens`.
+- `encode_with_special_tokens` IDs and `count_with_special_tokens`;
+- `encode_ordinary_into` appending to a non-empty vector, keeping its contents.
 
 It also checks that each valid-UTF-8 vocabulary token that forms a single piece (198,424 tokens) encodes to its
-own ID.
+own ID, and reports for each suite how many pieces over 128 bytes fell back to the whole-piece heap merge.
+
+Two more checks use hooks from the crate's `harness` feature, which the bench enables and consumers should not:
+
+- `forced_fallback_<n>` reruns the full text checks on the long-piece suites with window merging made to give
+  up after `n` stitched windows (0, 1, 16, 1,024). Every long piece that needs more windows than that takes the
+  discard-and-retry path, and the 1,024 setting discards tokens already appended or counted. The command fails if
+  a setting reaches no fallback or no setting discards tokens. This injects the failure; it does not construct a
+  piece that has no stitch point.
+- `arbitrary_bytes` checks byte strings that are not regex pieces: random bytes, invalid UTF-8, small byte
+  alphabets and valid text cut at any byte, at lengths 0 to 65,536 including 31/32/33, 127/128/129, 4,095/4,096/4,097.
+  `encode_piece` (appending), `count_piece`, the stack merge, the window merge, the forced fallback and the heap
+  merge with both `u32` and `usize` part indices must all match tiktoken-rs's `byte_pair_split` (pieces up to
+  10,000 bytes) or the heap merge (longer ones).
 
 | Suite | Texts | Bytes | What it covers |
 | --- | ---: | ---: | --- |
@@ -293,10 +321,12 @@ own ID.
 | `multilingual_256` | 1,921 | 491,200 | CJK, Hangul, Cyrillic, Greek, Arabic, Devanagari, Thai, emoji ZWJ sequences |
 | `fixture_200k` | 1 | 938,163 | Shared `o200k_base` comparison fixture |
 | `long_runs` | 9 | 1,760,000 | 300k `a`, 300k spaces, repeated digits, `ab`, combining marks, punctuation, CJK, cycles |
-| `long_random` | 988 | 2,172,677 | Long single pieces from small alphabets (letters, CJK, marks, punctuation, whitespace) with lengths around the window sizes (129 … 20,000) and runs with one interruption |
+| `long_random` | 1,092 | 2,598,617 | Long single pieces from small alphabets (letters, CJK, marks, punctuation, whitespace) with lengths around the window sizes (129 … 20,000) and runs with one interruption |
 | `long_unrepeated` | 131 | 713,408 | Seeded random `a`/`b`, CJK and punctuation pieces, 129 bytes to 240 KB: no window ever repeats |
 | `session_snapshots` | 20 | 11,850,632 | Real coding-agent session transcripts |
 | `token_identity` | 198,424 tokens | — | Each valid-UTF-8, single-piece vocabulary token encodes to itself |
+| `forced_fallback_<n>` | 1,233 × 4 | — | Long-piece suites again, with window merging forced to give up after 0, 1, 16 or 1,024 stitches |
+| `arbitrary_bytes` | 630 pieces | 1,229,530 | Non-regex byte strings at boundary lengths, every merge path, against tiktoken-rs `byte_pair_split` |
 
 `fixture_200k` and `session_snapshots` run only when `MAGI_TOKENIZER_ASSETS` is set. Latest result, with both
 fixtures and the `toks` source tree: **0 mismatches in every suite**, in about 17 seconds on an Apple M5 Pro.
@@ -419,12 +449,14 @@ the scanner, tables or merge code.
 
 - **Slow case.** Long random pieces of CJK text from a small set of characters (see above).
 - **Heap fallback memory.** If a stretch of a long piece has no stitch point within 4,096 bytes, the whole piece
-  is merged with the heap, which needs memory proportional to its length. How often real text reaches this path
-  has not been measured, and no test forces it yet.
+  is merged with the heap: 26–27 bytes of peak memory per piece byte and 11–20 times slower than windows in the
+  measured runs (see [Bounded memory](#how-it-works)); not a proven bound. No piece in the `verify` suites,
+  including the session snapshots and the shared fixture, reaches it naturally, but no input is known to be unable
+  to reach it.
 - **One encoding.** Only `o200k_base`. Other encodings (`cl100k_base`, `o200k_harmony`) and model-name routing are
   not implemented.
-- **Testing gaps.** No direct differential test of the heap merge on arbitrary byte strings, no tests of pieces of
-  4 GiB or more (the `usize` index path), and measurements only on ARM64 macOS.
+- **Testing gaps.** The `usize` index path is checked on small pieces through a harness hook, not on a real piece
+  of 4 GiB or more. Measurements only on ARM64 macOS.
 
 ## Provenance and licensing
 

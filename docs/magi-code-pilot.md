@@ -56,15 +56,13 @@ These items are not established yet. Each one has an issue:
 
 | Gap | Issue |
 | --- | --- |
-| No test forces the whole-piece heap fallback. Its frequency and worst-case memory are unknown. | [#1](https://github.com/magimetal/magi-tokenizer/issues/1) |
-| No direct tests of heap merge, append encode, boundary sizes or the `usize` index path. | [#2](https://github.com/magimetal/magi-tokenizer/issues/2) |
-| No panic audit. | [#3](https://github.com/magimetal/magi-tokenizer/issues/3) |
+| Long untrusted input could reach the whole-piece heap fallback: in measured runs 26–27 bytes of peak memory per piece byte (input included) and 11–20 times slower than windows, not a proven bound. `verify` now forces and checks this path; no verified text reaches it naturally, but no input is known to be unable to reach it. | [#1](https://github.com/magimetal/magi-tokenizer/issues/1) |
 | Verified only on ARM64 macOS. No CI. Not built with Rust 1.90.0. | [#4](https://github.com/magimetal/magi-tokenizer/issues/4) |
 | NOTICE does not contain the Unicode license text. | [#5](https://github.com/magimetal/magi-tokenizer/issues/5) |
 | Long random CJK pieces are slower than with bpe-openai. | [#6](https://github.com/magimetal/magi-tokenizer/issues/6) |
 | Effect on magi-code build time and binary size is not measured. | [#7](https://github.com/magimetal/magi-tokenizer/issues/7) |
 
-Because of #1 and #3:
+Because of #1 and #4:
 
 - Do not use the active phase on a platform that has not passed `verify` (#4).
 - Keep the `off` mode until the gaps that affect your platforms are closed.

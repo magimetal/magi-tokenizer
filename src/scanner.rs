@@ -28,6 +28,16 @@ const CASED: u8 = UPPER | LOWER;
 /// U+017F LATIN SMALL LETTER LONG S, which `(?i:'s)` also matches.
 const LONG_S: u32 = 0x017F;
 
+// `atom_at` indexes BLOCK_CLASSES with `block << 8 | low byte`; every block index must name a full 256-entry block.
+const _: () = {
+    let mut i = 0;
+    while i < BLOCK_INDEX.len() {
+        assert!((BLOCK_INDEX[i] as usize + 1) * 256 <= BLOCK_CLASSES.len());
+        i += 1;
+    }
+};
+const _: () = assert!(BLOCK_INDEX.len() << 8 == 0x110000);
+
 /// Class byte, scalar value and UTF-8 length of the scalar starting at `pos` (`pos < text.len()`).
 #[inline(always)]
 fn atom_at(text: &[u8], pos: usize) -> (u8, u32, usize) {

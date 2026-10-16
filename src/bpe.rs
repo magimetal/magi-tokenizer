@@ -17,6 +17,14 @@ const MAX_WINDOW_BYTES: usize = 4096;
 /// A new window reaches back over the last `window / OVERLAP_DIVISOR` bytes of the encoding so far.
 const OVERLAP_DIVISOR: usize = 8;
 
+// Index math below relies on these: short pieces fit stack arrays and u8 links with a power-of-two position mask,
+// a window that misses `done` grows past it after one doubling, and window token ends fit u32.
+const _: () = {
+    assert!(SHORT_PIECE_BYTES.is_power_of_two() && SHORT_PIECE_BYTES <= u8::MAX as usize);
+    assert!(crate::table_hash::MAX_TOKEN_BYTES <= SHORT_PIECE_BYTES);
+    assert!(FIRST_WINDOW_BYTES >= SHORT_PIECE_BYTES && MAX_WINDOW_BYTES <= u32::MAX as usize);
+};
+
 /// Appends the tokens of `piece` to `out`.
 #[inline]
 pub(crate) fn encode_piece(piece: &[u8], out: &mut Vec<u32>) {
@@ -157,11 +165,11 @@ struct MergedWindow {
 
 fn window_cache_slot(bytes: &[u8]) -> usize {
     let mut hash = bytes.len() as u64;
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        hash = (hash.rotate_left(5) ^ u64::from_le_bytes(chunk.try_into().unwrap())).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
+        hash = (hash.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
-    for &byte in chunks.remainder() {
+    for &byte in remainder {
         hash = (hash.rotate_left(5) ^ byte as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
     (hash >> 60) as usize % WINDOW_CACHE_SLOTS
@@ -265,6 +273,9 @@ fn merge_linked(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
     const NO_KEY: u32 = u32::MAX;
     const KEY_BLOCK: usize = 32;
     const BLOCKS: usize = SHORT_PIECE_BYTES / KEY_BLOCK;
+    // A packed key (rank below 2^PAIR_ID_BITS) fits u32 and never equals NO_KEY.
+    const { assert!(crate::table_hash::PAIR_ID_BITS + POSITION_BITS < 32) };
+    const { assert!(SHORT_PIECE_BYTES.is_multiple_of(KEY_BLOCK)) };
     let key = |rank: u32, position: usize| {
         if rank == NO_MERGE { NO_KEY } else { rank << POSITION_BITS | position as u32 }
     };

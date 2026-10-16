@@ -46,6 +46,8 @@ fn main() {
     let vocab_table = build_vocab_table(&tokens);
     let (pair_table, pair_count) = build_pair_table(&tokens, &id_by_bytes);
     assert_eq!(pair_count, EXPECTED_PAIR_COUNT, "unexpected merge pair count");
+    // Library probe loops end at an empty slot, so each table must keep one.
+    assert!(tokens.len() < 1 << VOCAB_TABLE_BITS && pair_count < 1 << PAIR_TABLE_BITS);
 
     let byte_tokens: Vec<u32> = (0..=255u8).map(|byte| id_by_bytes[&[byte][..]]).collect();
     let byte_pair_ranks: Vec<u32> = (0..65536u32)
@@ -193,7 +195,7 @@ impl TableWord for u64 {
 }
 
 fn write_words<T: TableWord>(path: &Path, words: &[T], little_endian: bool) {
-    let mut bytes = Vec::with_capacity(words.len() * size_of::<T>());
+    let mut bytes = Vec::with_capacity(size_of_val(words));
     words.iter().for_each(|word| word.to_bytes(little_endian, &mut bytes));
     fs::write(path, bytes).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
 }

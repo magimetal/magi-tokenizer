@@ -143,6 +143,21 @@ can be called from any number of threads at once.
 
 Constants: `END_OF_TEXT`, `END_OF_PROMPT`, `SPECIAL_TOKENS`, `ORDINARY_TOKEN_COUNT`.
 
+### Panics
+
+No function panics or loops forever on any `&str` input or any `u32` token ID. Unknown IDs return `None`.
+Exceptions:
+
+- **Allocation failure.** Out of memory aborts the process; `catch_unwind` cannot catch it. Encoding allocates
+  output in proportion to the token count, and the whole-piece heap fallback allocates in proportion to the piece
+  length.
+- **Capacity overflow on 32-bit targets.** A single input or piece of several hundred MiB can request a buffer
+  over `isize::MAX` bytes, which panics. On 64-bit targets the allocation fails first.
+
+The audit for [issue #3](https://github.com/magimetal/magi-tokenizer/issues/3) lists the invariant behind each
+index, `unwrap` and the `unsafe` table view. Compile-time assertions check the table and index invariants;
+`verify` passes with `overflow-checks` and `debug-assertions` enabled in release.
+
 ## How it works
 
 Tokenization has two stages, and both must match tiktoken exactly:
@@ -408,8 +423,8 @@ the scanner, tables or merge code.
   has not been measured, and no test forces it yet.
 - **One encoding.** Only `o200k_base`. Other encodings (`cl100k_base`, `o200k_harmony`) and model-name routing are
   not implemented.
-- **Testing gaps.** No direct differential test of the heap merge on arbitrary byte strings, no panic audit, no
-  tests of pieces of 4 GiB or more (the `usize` index path), and measurements only on ARM64 macOS.
+- **Testing gaps.** No direct differential test of the heap merge on arbitrary byte strings, no tests of pieces of
+  4 GiB or more (the `usize` index path), and measurements only on ARM64 macOS.
 
 ## Provenance and licensing
 

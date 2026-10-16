@@ -3,16 +3,18 @@
 //   cargo run --release -p magi-toks-bench -- verify   # exact pieces/ids/counts/decode vs references
 //   cargo run --release -p magi-toks-bench -- bench    # throughput, all three tokenizers
 //   cargo run --release -p magi-toks-bench -- startup <magi|tiktoken|bpe-openai>  # one first-call timing
+//
+// Inputs: MAGI_TOKS_SOURCE lists source trees (path-list syntax, default: this repository) to cut into chunks.
+// MAGI_TOKS_ASSETS names a directory with o200k_base-200k.txt and session-compacted-500.json; without it those
+// suites are skipped.
 
 use std::hint::black_box;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-const COMPARISON_ASSETS: &str = "/Users/magimetal/Dev/_third-party/toks-comparison/assets";
-const SOURCE_ROOTS: [&str; 2] = ["/Users/magimetal/Dev/magi-code/src", "/Users/magimetal/Dev/_third-party/toks/src"];
 /// tiktoken-rs 0.12.0 `O200K_BASE_PAT_STR`, copied verbatim because tiktoken-rs does not export it.
 const O200K_PATTERN: &str = concat!(
     r#"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?"#,
@@ -67,8 +69,11 @@ fn collect_source_text(root: &Path, out: &mut String, limit: usize) {
         if out.len() >= limit {
             return;
         }
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
         if path.is_dir() {
-            collect_source_text(&path, out, limit);
+            if !name.starts_with('.') && name != "target" {
+                collect_source_text(&path, out, limit);
+            }
         } else if matches!(path.extension().and_then(|e| e.to_str()), Some("rs" | "c" | "h" | "md" | "py" | "toml" | "json"))
             && let Ok(text) = fs::read_to_string(&path)
         {
@@ -79,31 +84,46 @@ fn collect_source_text(root: &Path, out: &mut String, limit: usize) {
 }
 
 fn source_text() -> String {
+    let roots: Vec<PathBuf> = match env::var_os("MAGI_TOKS_SOURCE") {
+        Some(roots) => env::split_paths(&roots).collect(),
+        None => vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("..")],
+    };
     let mut text = String::new();
-    for root in SOURCE_ROOTS {
+    for root in roots {
         let limit = text.len() + (4 << 20);
-        collect_source_text(Path::new(root), &mut text, limit);
+        collect_source_text(&root, &mut text, limit);
     }
     text
 }
 
-fn fixture_200k() -> Result<String> {
-    Ok(fs::read_to_string(Path::new(COMPARISON_ASSETS).join("o200k_base-200k.txt"))?)
+/// `Ok(None)` when MAGI_TOKS_ASSETS is unset; an error when it is set but the asset is missing or malformed.
+fn comparison_asset(name: &str) -> Result<Option<Vec<u8>>> {
+    let Some(dir) = env::var_os("MAGI_TOKS_ASSETS") else { return Ok(None) };
+    let path = PathBuf::from(dir).join(name);
+    Ok(Some(fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?))
 }
 
-fn session_snapshots() -> Result<Vec<String>> {
-    let fixture: serde_json::Value =
-        serde_json::from_slice(&fs::read(Path::new(COMPARISON_ASSETS).join("session-compacted-500.json"))?)?;
-    let segments = fixture["segments"].as_array().ok_or("segments")?;
-    let snapshots = fixture["snapshots"].as_array().ok_or("snapshots")?;
-    snapshots
-        .iter()
-        .map(|snapshot| {
-            let segment = snapshot["segment"].as_u64().ok_or("segment")? as usize;
-            let end = snapshot["end"].as_u64().ok_or("end")? as usize;
-            Ok(segments[segment].as_str().and_then(|text| text.get(..end)).ok_or("snapshot text")?.to_owned())
-        })
-        .collect()
+fn fixture_200k() -> Result<Option<String>> {
+    let Some(bytes) = comparison_asset("o200k_base-200k.txt")? else { return Ok(None) };
+    Ok(Some(String::from_utf8(bytes)?))
+}
+
+fn session_snapshots() -> Result<Option<Vec<String>>> {
+    let Some(bytes) = comparison_asset("session-compacted-500.json")? else { return Ok(None) };
+    let fixture: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let snapshots = (|| {
+        let segments = fixture["segments"].as_array()?;
+        fixture["snapshots"]
+            .as_array()?
+            .iter()
+            .map(|snapshot| {
+                let segment = snapshot["segment"].as_u64()? as usize;
+                let end = snapshot["end"].as_u64()? as usize;
+                Some(segments.get(segment)?.as_str()?.get(..end)?.to_owned())
+            })
+            .collect::<Option<Vec<_>>>()
+    })();
+    Ok(Some(snapshots.ok_or("session-compacted-500.json: unexpected structure")?))
 }
 
 fn multilingual_text() -> String {
@@ -227,12 +247,16 @@ fn verify() -> Result<()> {
         ("source_48", chunks(&source, 48)),
         ("source_4096", chunks(&source, 4096)),
         ("multilingual_256", chunks(&multilingual_text(), 256)),
-        ("fixture_200k", vec![fixture_200k()?]),
         ("long_runs", long_runs()),
         ("long_random", long_random_pieces()),
+        ("long_unrepeated", long_unrepeated_pieces()),
     ];
-    if let Ok(snapshots) = session_snapshots() {
-        suites.push(("session_snapshots", snapshots.into_iter().step_by(25).collect()));
+    if let Some(fixture) = fixture_200k()? {
+        suites.push(("fixture_200k", vec![fixture]));
+    }
+    match session_snapshots()? {
+        Some(snapshots) => suites.push(("session_snapshots", snapshots.into_iter().step_by(25).collect())),
+        None => println!("MAGI_TOKS_ASSETS not set: skipping fixture_200k / session_snapshots"),
     }
     let mut failures = 0;
     for (name, texts) in &suites {
@@ -346,13 +370,42 @@ fn long_random_pieces() -> Vec<String> {
 }
 
 
+/// Pieces that defeat window reuse: long random text from small alphabets. Stitch points are found quickly,
+/// but every window is new, so the cache never hits. These are the workloads where window merging costs the most.
+fn long_unrepeated_pieces() -> Vec<String> {
+    let mut state = 0x7777_1111_2222_3333u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut random_text = |len: usize, alphabet: &[&str]| {
+        let mut text = String::new();
+        while text.len() < len {
+            text.push_str(alphabet[(next() % alphabet.len() as u64) as usize]);
+        }
+        text
+    };
+    let mut texts = vec![
+        random_text(200_000, &["a", "b"]),
+        random_text(240_000, &["你", "好", "世", "界", "的", "是", "在", "了"]),
+        random_text(200_000, &["!", "=", "-", "*", "(", ")", "{", "}", ";", "."]),
+    ];
+    for len in (129..1024).step_by(7) {
+        texts.push(random_text(len, &["a", "b"]));
+    }
+    texts
+}
+
 fn check_every_token_round_trips() -> Result<()> {
     let mut checked = 0;
     for id in 0..magi_toks::ORDINARY_TOKEN_COUNT as u32 {
         let bytes = magi_toks::token_bytes(id).ok_or("missing token")?;
-        if let Ok(text) = std::str::from_utf8(bytes) {
-            let pieces: Vec<&str> = magi_toks::pieces(text).collect();
-            if pieces.len() == 1 && magi_toks::encode_ordinary(text) != [id] {
+        if let Ok(text) = std::str::from_utf8(bytes)
+            && magi_toks::pieces(text).count() == 1
+        {
+            if magi_toks::encode_ordinary(text) != [id] {
                 return Err(format!("token {id} ({text:?}) does not encode to itself").into());
             }
             checked += 1;
@@ -364,20 +417,28 @@ fn check_every_token_round_trips() -> Result<()> {
 
 // ---- benchmarks -----------------------------------------------------------------------------------------
 
-/// Median of five runs, each at least 150ms, of microseconds per call of `work`.
-fn time_per_call(mut work: impl FnMut() -> usize) -> f64 {
-    let mut runs = Vec::new();
-    for _ in 0..5 {
-        let start = Instant::now();
-        let mut rounds = 0u32;
-        while start.elapsed() < Duration::from_millis(150) {
-            black_box(work());
-            rounds += 1;
+/// Microseconds per call of each `work`, the median of five rounds. Within a round every `work` runs for at least
+/// 150ms, in rotating order, so background load and frequency changes hit all tokenizers alike.
+fn time_per_call(works: &[&dyn Fn() -> usize]) -> Vec<f64> {
+    let mut runs = vec![Vec::new(); works.len()];
+    for round in 0..5 {
+        for offset in 0..works.len() {
+            let index = (round + offset) % works.len();
+            let start = Instant::now();
+            let mut rounds = 0u32;
+            while start.elapsed() < Duration::from_millis(150) {
+                black_box(works[index]());
+                rounds += 1;
+            }
+            runs[index].push(start.elapsed().as_secs_f64() * 1e6 / f64::from(rounds));
         }
-        runs.push(start.elapsed().as_secs_f64() * 1e6 / f64::from(rounds));
     }
-    runs.sort_by(f64::total_cmp);
-    runs[2]
+    runs.into_iter()
+        .map(|mut times| {
+            times.sort_by(f64::total_cmp);
+            times[2]
+        })
+        .collect()
 }
 
 fn bench(filter: Option<&str>) -> Result<()> {
@@ -385,14 +446,17 @@ fn bench(filter: Option<&str>) -> Result<()> {
     let bpe_openai = bpe_openai::o200k_base();
     let source = source_text();
     let mut workloads: Vec<(&str, Vec<String>)> = vec![
-        ("fixture_200k", vec![fixture_200k()?]),
         ("source_1MiB", vec![source[..source.floor_char_boundary(1 << 20)].to_owned()]),
         ("source_48B_chunks", chunks(&source[..source.floor_char_boundary(256 << 10)], 48)),
         ("source_256B_chunks", chunks(&source[..source.floor_char_boundary(256 << 10)], 256)),
         ("multilingual", vec![multilingual_text()]),
         ("long_runs", long_runs()),
+        ("long_unrepeated", long_unrepeated_pieces()),
     ];
-    if let Ok(snapshots) = session_snapshots() {
+    if let Some(fixture) = fixture_200k()? {
+        workloads.insert(0, ("fixture_200k", vec![fixture]));
+    }
+    if let Some(snapshots) = session_snapshots()? {
         workloads.push(("session_snapshots", snapshots.into_iter().step_by(10).collect()));
     }
     println!(
@@ -412,24 +476,27 @@ fn bench(filter: Option<&str>) -> Result<()> {
         let mib = bytes as f64 / (1 << 20) as f64;
         let throughput = |micros: f64| mib / (micros / 1e6);
         let sum_over = |f: &dyn Fn(&str) -> usize| texts.iter().map(|text| f(black_box(text))).sum::<usize>();
-        let magi_cnt = time_per_call(|| sum_over(&|text| magi_toks::count_ordinary(text)));
-        let tik_cnt = time_per_call(|| sum_over(&|text| tiktoken.encode_ordinary(text).len()));
-        let bpe_cnt = time_per_call(|| sum_over(&|text| bpe_openai.count(text)));
-        let magi_enc = time_per_call(|| sum_over(&|text| magi_toks::encode_ordinary(text).len()));
-        let tik_enc = time_per_call(|| sum_over(&|text| tiktoken.encode_ordinary(text).len()));
-        let bpe_enc = time_per_call(|| sum_over(&|text| bpe_openai.encode(text).len()));
+        let times = time_per_call(&[
+            &|| sum_over(&|text| magi_toks::count_ordinary(text)),
+            &|| sum_over(&|text| tiktoken.encode_ordinary(text).len()),
+            &|| sum_over(&|text| bpe_openai.count(text)),
+            &|| sum_over(&|text| magi_toks::encode_ordinary(text).len()),
+            &|| sum_over(&|text| bpe_openai.encode(text).len()),
+        ]);
+        // tiktoken has no count; its encode serves as both.
+        let [magi_cnt, tik, bpe_cnt, magi_enc, bpe_enc] = times[..] else { unreachable!() };
         println!(
-            "{name:<20} {mib:>9.3} | {:>8.1}MB/s {:>8.1}MB/s {:>8.1}MB/s | {:>8.1}MB/s {:>8.1}MB/s {:>8.1}MB/s | \
+            "{name:<20} {mib:>9.3} | {:>7.1}MiB/s {:>7.1}MiB/s {:>7.1}MiB/s | {:>7.1}MiB/s {:>7.1}MiB/s {:>7.1}MiB/s | \
              count {:.2}x/{:.2}x encode {:.2}x/{:.2}x",
             throughput(magi_cnt),
-            throughput(tik_cnt),
+            throughput(tik),
             throughput(bpe_cnt),
             throughput(magi_enc),
-            throughput(tik_enc),
+            throughput(tik),
             throughput(bpe_enc),
-            tik_cnt / magi_cnt,
+            tik / magi_cnt,
             bpe_cnt / magi_cnt,
-            tik_enc / magi_enc,
+            tik / magi_enc,
             bpe_enc / magi_enc,
         );
     }

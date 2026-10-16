@@ -9,8 +9,10 @@ use std::collections::BinaryHeap;
 /// Pieces up to this length merge in stack arrays with linear minimum search. Every token is at most this long.
 const SHORT_PIECE_BYTES: usize = 128;
 /// Long pieces are encoded as overlapping windows of FIRST_WINDOW_BYTES; a window doubles while no stitch point is
-/// found, up to MAX_WINDOW_BYTES, after which the whole piece is merged directly.
-const FIRST_WINDOW_BYTES: usize = 64;
+/// found, up to MAX_WINDOW_BYTES, after which the whole piece is merged directly. The size sets how windows of
+/// periodic text advance, so it decides whether they recur and hit the cache: measured on long runs, 128 beat 64,
+/// and 48 or 96 were six times slower.
+const FIRST_WINDOW_BYTES: usize = 128;
 const MAX_WINDOW_BYTES: usize = 4096;
 /// A new window reaches back over the last `window / OVERLAP_DIVISOR` bytes of the encoding so far.
 const OVERLAP_DIVISOR: usize = 8;
@@ -25,13 +27,16 @@ pub(crate) fn encode_piece(piece: &[u8], out: &mut Vec<u32>) {
     }
 }
 
-/// Number of tokens `piece` encodes to.
+/// Number of tokens `piece` encodes to. Long pieces are counted in bounded memory unless the whole-piece fallback runs.
 #[inline]
 pub(crate) fn count_piece(piece: &[u8]) -> usize {
     if piece.len() > SHORT_PIECE_BYTES {
-        let mut tokens = Vec::new();
-        encode_long_piece(piece, &mut tokens);
-        tokens.len()
+        let mut count = 0;
+        if !merge_in_windows(piece, |tokens| count += tokens.len()) {
+            count = 0;
+            merge_long_piece(piece, |_| count += 1);
+        }
+        count
     } else if token_id_for_bytes(piece).is_some() {
         1
     } else {
@@ -50,23 +55,44 @@ fn encode_short_piece(piece: &[u8], out: &mut Vec<u32>) {
     }
 }
 
-/// Encodes a long piece as overlapping windows, each merged on its own. If the encoding built so far and the next
-/// window's encoding contain the same token at the same position, the encoding so far up to that token followed by
-/// the window's tokens after it is the exact encoding of the combined text: both sides are exact encodings, and BPE
-/// never merges across a token that both sides agree on (see the `bpe` crate README, "Properties of BPE"). Windows
-/// with identical bytes reuse an earlier merge.
 fn encode_long_piece(piece: &[u8], out: &mut Vec<u32>) {
     let base = out.len();
-    // End offset in `piece` of each token in out[base..].
-    let mut ends: Vec<usize> = Vec::with_capacity(piece.len() / 2);
+    if !merge_in_windows(piece, |tokens| out.extend_from_slice(tokens)) {
+        out.truncate(base);
+        merge_long_piece(piece, |id| out.push(id));
+    }
+}
+
+/// How far before `done` a window can start: its overlap plus one token, since it starts at a token boundary.
+/// Tokens ending at least this far back are final.
+const REACH_BACK_BYTES: usize = MAX_WINDOW_BYTES / OVERLAP_DIVISOR + SHORT_PIECE_BYTES;
+/// Pending tokens are checked for final ones once there are this many.
+const COMMIT_BATCH_TOKENS: usize = 4096;
+
+/// Passes the exact encoding of a long piece to `commit`, in order and in batches, as overlapping windows each
+/// merged on their own. If the encoding built so far and the next window's encoding contain the same token at the
+/// same position, the encoding so far up to that token followed by the window's tokens after it is the exact
+/// encoding of the combined text: both sides are exact encodings, and BPE never merges across a token that both
+/// sides agree on (see the `bpe` crate README, "Properties of BPE"). Windows with identical bytes reuse an earlier
+/// merge.
+///
+/// Returns false when a stretch has no stitch point within MAX_WINDOW_BYTES. A prefix may already have been
+/// committed; the caller discards it and merges the whole piece instead.
+fn merge_in_windows(piece: &[u8], mut commit: impl FnMut(&[u32])) -> bool {
+    // Tokens not yet committed, with the end offset in `piece` of each. Only the stretch after a window's start is
+    // ever replaced, and windows start at or after `committed_end`.
+    let mut tokens: Vec<u32> = Vec::new();
+    let mut ends: Vec<usize> = Vec::new();
+    let mut committed_end = 0;
     let mut cache: [MergedWindow; WINDOW_CACHE_SLOTS] = Default::default();
     let mut window_bytes = FIRST_WINDOW_BYTES;
     let mut done = 0;
     while done < piece.len() {
         // Start the window where a token of the encoding so far starts: the window's merges then begin from the
-        // same position, so its first tokens usually match and stitch immediately.
+        // same position, so its first tokens usually match and stitch immediately. Pending tokens all end after
+        // `committed_end`, and it is at least REACH_BACK_BYTES behind, so it is the right start when none qualify.
         let first_overlap = ends.partition_point(|&end| end <= done.saturating_sub(window_bytes / OVERLAP_DIVISOR));
-        let start = if first_overlap == 0 { 0 } else { ends[first_overlap - 1] };
+        let start = if first_overlap == 0 { committed_end } else { ends[first_overlap - 1] };
         let window = start..(start + window_bytes).min(piece.len());
         // A long first token can pin `start` so the window cannot reach past `done`; grow until it does. Tokens are
         // at most SHORT_PIECE_BYTES long, so this stops well before MAX_WINDOW_BYTES.
@@ -80,17 +106,16 @@ fn encode_long_piece(piece: &[u8], out: &mut Vec<u32>) {
             merge_window(bytes, &mut merged.tokens, &mut merged.ends);
             merged.range = window.clone();
         }
-        match find_shared_token(&out[base..], &ends, start, &merged.tokens, &merged.ends) {
+        match find_shared_token(&tokens, &ends, start, &merged.tokens, &merged.ends) {
             Some((done_index, window_index)) => {
-                out.truncate(base + done_index + 1);
+                tokens.truncate(done_index + 1);
                 ends.truncate(done_index + 1);
-                out.extend_from_slice(&merged.tokens[window_index + 1..]);
+                tokens.extend_from_slice(&merged.tokens[window_index + 1..]);
                 ends.extend(merged.ends[window_index + 1..].iter().map(|&end| start + end as usize));
             }
             // A window from the piece start is itself the exact encoding of everything up to its end.
             None if start == 0 => {
-                out.truncate(base);
-                out.extend_from_slice(&merged.tokens);
+                tokens.clone_from(&merged.tokens);
                 ends.clear();
                 ends.extend(merged.ends.iter().map(|&end| end as usize));
             }
@@ -98,16 +123,23 @@ fn encode_long_piece(piece: &[u8], out: &mut Vec<u32>) {
                 window_bytes *= 2;
                 continue;
             }
-            None => {
-                out.truncate(base);
-                merge_long_piece(piece, |id| out.push(id));
-                return;
-            }
+            None => return false,
         }
         done = window.end;
         // Hard stretches are local: go back to cheap windows once a stitch succeeds.
         window_bytes = FIRST_WINDOW_BYTES;
+        if tokens.len() >= COMMIT_BATCH_TOKENS {
+            let final_tokens = ends.partition_point(|&end| end + REACH_BACK_BYTES <= done);
+            if final_tokens > 0 {
+                committed_end = ends[final_tokens - 1];
+                commit(&tokens[..final_tokens]);
+                tokens.drain(..final_tokens);
+                ends.drain(..final_tokens);
+            }
+        }
     }
+    commit(&tokens);
+    true
 }
 
 /// Recently merged windows, direct-mapped by content hash. A hit is confirmed by comparing the bytes in full, so
@@ -177,24 +209,36 @@ fn find_shared_token(
     None
 }
 
-/// Merges a piece of 2..=SHORT_PIECE_BYTES bytes; writes its tokens to the front of `tokens`, returns the count.
+/// Below this length, shifting parts down after each merge is cheaper than linking them.
+const LINKED_MERGE_BYTES: usize = 32;
+
+/// Merges a piece of at most SHORT_PIECE_BYTES bytes; writes its tokens to the front of `tokens`, returns the count.
 #[inline]
 fn merge_short_piece(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
+    if piece.len() < LINKED_MERGE_BYTES { merge_by_shifting(piece, tokens) } else { merge_linked(piece, tokens) }
+}
+
+/// Keeps parts packed at the front: after each merge the parts and ranks above it shift down by one, so each
+/// minimum search covers only the live parts. `position` keeps the leftmost of tied ranks.
+#[inline]
+fn merge_by_shifting(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
     let mut count = piece.len();
-    // ranks[i]: rank of merging tokens[i] and tokens[i + 1]; ranks[count - 1] stays NO_MERGE as a sentinel.
-    let mut ranks = [NO_MERGE; SHORT_PIECE_BYTES];
+    if count == 0 {
+        return 0;
+    }
+    // ranks[i]: rank of merging tokens[i] and tokens[i + 1].
+    let mut ranks = [NO_MERGE; LINKED_MERGE_BYTES];
     for i in 0..count {
         tokens[i] = BYTE_TOKENS[piece[i] as usize];
     }
     for i in 0..count - 1 {
         ranks[i] = byte_merge_rank(piece[i], piece[i + 1]);
     }
-    loop {
-        // Two vectorizable passes beat one branchy pass; `position` keeps the leftmost of tied ranks.
+    while count > 1 {
         let live = &ranks[..count - 1];
         let best_rank = live.iter().copied().min().unwrap_or(NO_MERGE);
         if best_rank == NO_MERGE {
-            return count;
+            break;
         }
         let best = live.iter().position(|&rank| rank == best_rank).unwrap_or(0);
         tokens[best] = best_rank;
@@ -204,65 +248,170 @@ fn merge_short_piece(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usi
         ranks[count - 1] = NO_MERGE;
         if best + 1 < count {
             ranks[best] = merge_rank(tokens[best], tokens[best + 1]);
-        } else {
-            ranks[best] = NO_MERGE;
         }
         if best > 0 {
             ranks[best - 1] = merge_rank(tokens[best - 1], tokens[best]);
         }
-        if count == 1 {
-            return 1;
+    }
+    count
+}
+
+/// Parts stay in the slot of their first byte, linked by `next`/`prev`, so a merge moves nothing. `keys[i]` packs
+/// the rank of merging part i with its successor above i, so the minimum key is the lowest rank and, among equal
+/// ranks, the leftmost part. Merged-away and last parts hold u32::MAX. `block_min` keeps the minimum of each
+/// KEY_BLOCK keys: a merge changes at most three keys, so only their blocks are rescanned.
+fn merge_linked(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
+    const POSITION_BITS: u32 = SHORT_PIECE_BYTES.trailing_zeros();
+    const NO_KEY: u32 = u32::MAX;
+    const KEY_BLOCK: usize = 32;
+    const BLOCKS: usize = SHORT_PIECE_BYTES / KEY_BLOCK;
+    let key = |rank: u32, position: usize| {
+        if rank == NO_MERGE { NO_KEY } else { rank << POSITION_BITS | position as u32 }
+    };
+    let len = piece.len();
+    let mut keys = [NO_KEY; SHORT_PIECE_BYTES];
+    let mut next = [0u8; SHORT_PIECE_BYTES];
+    let mut prev = [0u8; SHORT_PIECE_BYTES];
+    for i in 0..len {
+        tokens[i] = BYTE_TOKENS[piece[i] as usize];
+        next[i] = i as u8 + 1;
+        prev[i] = (i as u8).wrapping_sub(1);
+    }
+    for i in 0..len - 1 {
+        keys[i] = key(byte_merge_rank(piece[i], piece[i + 1]), i);
+    }
+    let block_of = |keys: &[u32; SHORT_PIECE_BYTES], position: usize| {
+        let block = position / KEY_BLOCK * KEY_BLOCK;
+        keys[block..block + KEY_BLOCK].iter().copied().min().unwrap_or(NO_KEY)
+    };
+    let mut block_min = [NO_KEY; BLOCKS];
+    for (block, min) in block_min.iter_mut().enumerate() {
+        *min = block_of(&keys, block * KEY_BLOCK);
+    }
+    let mut count = len;
+    loop {
+        let best = block_min.iter().copied().min().unwrap_or(NO_KEY);
+        if best == NO_KEY {
+            break;
         }
+        let start = (best & (SHORT_PIECE_BYTES as u32 - 1)) as usize;
+        let merged = best >> POSITION_BITS;
+        let right = next[start] as usize;
+        let after = next[right] as usize;
+        tokens[start] = merged;
+        keys[right] = NO_KEY;
+        next[start] = after as u8;
+        keys[start] = if after < len {
+            prev[after] = start as u8;
+            key(merge_rank(merged, tokens[after]), start)
+        } else {
+            NO_KEY
+        };
+        block_min[right / KEY_BLOCK] = block_of(&keys, right);
+        block_min[start / KEY_BLOCK] = block_of(&keys, start);
+        if start > 0 {
+            let before = prev[start] as usize;
+            keys[before] = key(merge_rank(tokens[before], merged), before);
+            block_min[before / KEY_BLOCK] = block_of(&keys, before);
+        }
+        count -= 1;
+    }
+    // Compact live parts to the front; each part's slot is at or after its output position.
+    let mut part = 0;
+    for slot in 0..count {
+        tokens[slot] = tokens[part];
+        part = next[part] as usize;
+    }
+    count
+}
+
+/// Index of a part in `merge_long_piece`: u32 halves link memory, usize handles pieces of 4 GiB and more.
+trait PartIndex: Copy + Ord {
+    const NONE: Self;
+    fn from_index(index: usize) -> Self;
+    fn index(self) -> usize;
+}
+
+impl PartIndex for u32 {
+    const NONE: Self = u32::MAX;
+    fn from_index(index: usize) -> Self {
+        index as u32
+    }
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+impl PartIndex for usize {
+    const NONE: Self = usize::MAX;
+    fn from_index(index: usize) -> Self {
+        index
+    }
+    fn index(self) -> usize {
+        self
     }
 }
 
 /// Heap-driven merge for long pieces, O(n log n). Emits tokens in order.
-fn merge_long_piece(piece: &[u8], mut emit: impl FnMut(u32)) {
+fn merge_long_piece(piece: &[u8], emit: impl FnMut(u32)) {
+    if piece.len() < u32::MAX as usize {
+        merge_parts::<u32>(piece, emit);
+    } else {
+        merge_parts::<usize>(piece, emit);
+    }
+}
+
+fn merge_parts<I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u32)) {
     let len = piece.len();
-    const NONE: u32 = u32::MAX;
+    if len == 0 {
+        return;
+    }
     // Parts are identified by their first byte index. `next`/`prev` link live parts; `rank[i]` is the current
     // merge rank of part i with its successor, which invalidates stale heap entries.
     let mut tokens: Vec<u32> = piece.iter().map(|&byte| BYTE_TOKENS[byte as usize]).collect();
-    let mut next: Vec<u32> = (1..=len as u32).collect();
-    let mut prev: Vec<u32> = (0..len as u32).map(|i| i.wrapping_sub(1)).collect();
-    next[len - 1] = NONE;
+    let mut next: Vec<I> = (1..len).map(I::from_index).chain([I::NONE]).collect();
+    let mut prev: Vec<I> = [I::NONE].into_iter().chain((0..len - 1).map(I::from_index)).collect();
     let mut rank = vec![NO_MERGE; len];
     let mut heap = BinaryHeap::with_capacity(len);
     for i in 0..len - 1 {
         rank[i] = byte_merge_rank(piece[i], piece[i + 1]);
         if rank[i] != NO_MERGE {
-            heap.push(Reverse((rank[i], i as u32)));
+            heap.push(Reverse((rank[i], I::from_index(i))));
         }
     }
     while let Some(Reverse((merge, start))) = heap.pop() {
-        let start = start as usize;
+        let start = start.index();
         if rank[start] != merge {
             continue;
         }
-        let right = next[start] as usize;
+        let right = next[start].index();
         tokens[start] = merge;
         let after = next[right];
         next[start] = after;
-        if after != NONE {
-            prev[after as usize] = start as u32;
+        if after != I::NONE {
+            prev[after.index()] = I::from_index(start);
         }
         rank[right] = NO_MERGE;
-        rank[start] = if after != NONE { merge_rank(merge, tokens[after as usize]) } else { NO_MERGE };
+        rank[start] = if after != I::NONE { merge_rank(merge, tokens[after.index()]) } else { NO_MERGE };
         if rank[start] != NO_MERGE {
-            heap.push(Reverse((rank[start], start as u32)));
+            heap.push(Reverse((rank[start], I::from_index(start))));
         }
         let before = prev[start];
-        if before != NONE {
-            let before = before as usize;
+        if before != I::NONE {
+            let before = before.index();
             rank[before] = merge_rank(tokens[before], merge);
             if rank[before] != NO_MERGE {
-                heap.push(Reverse((rank[before], before as u32)));
+                heap.push(Reverse((rank[before], I::from_index(before))));
             }
         }
     }
-    let mut part = 0u32;
-    while part != NONE {
-        emit(tokens[part as usize]);
-        part = next[part as usize];
+    let mut part = 0;
+    loop {
+        emit(tokens[part]);
+        let following = next[part];
+        if following == I::NONE {
+            return;
+        }
+        part = following.index();
     }
 }

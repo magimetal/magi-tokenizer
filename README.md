@@ -7,12 +7,12 @@ For every input, magi-toks produces the same token IDs as
 goal, but exactness is required. A faster result with one wrong token ID is a failure.
 
 > **Status: experimental, version 0.1.0.** The library passes the full differential verification suite described
-> below. It is not published. A portable benchmark harness and several hardening items are still open (see
-> [Known limitations](#known-limitations)).
+> below. It is not published. Open items are listed under [Known limitations](#known-limitations).
 
 ## Contents
 
 - [Scope](#scope)
+- [What is different](#what-is-different)
 - [Quick start](#quick-start)
 - [API](#api)
 - [How it works](#how-it-works)
@@ -32,6 +32,68 @@ goal, but exactness is required. A faster result with one wrong token ID is a fa
 | Models | Upstream tiktoken maps the GPT-4o, o-series and GPT-5 model prefixes to `o200k_base`. GPT-5.6, GPT-6.0, GPT-6.1 and Astra are target models, but their encodings are **not confirmed yet**. The library exposes the encoding, not a model-name router, so it does not claim support for unconfirmed models. |
 | Input | `&str` (valid UTF-8). Decoding can return raw bytes for token sequences that are not valid UTF-8. |
 | Platforms | Any Rust target. Tables are emitted in the target's byte order. Development and measurement were done on ARM64 macOS. |
+
+## What is different
+
+Every exact `o200k_base` tokenizer must compute the same result: split text into pieces with the same regex, then
+repeatedly merge the lowest-rank adjacent pair in each piece. The projects differ in how they compute it. This
+table compares magi-toks with the two Rust tokenizers it is benchmarked against.
+
+| Stage | tiktoken-rs | bpe-openai | magi-toks |
+| --- | --- | --- | --- |
+| Vocabulary setup | Decoded and hashed at run time (166 ms first call) | Built at run time (78 ms first call) | Built by `build.rs` into embedded hash tables; nothing runs at start (0.1 ms first call) |
+| Pretokenizer | `fancy-regex` with lookahead | `regex-automata` with a lookahead workaround | Hand-written scanner (derived from `toks`) with Unicode 16 classes generated from the same `regex` crate version as the reference |
+| Short pieces | Rescans all pair ranks after each merge | Backtracking search over Aho-Corasick automata of the vocabulary | Stack arrays, no allocation; packed rank+position keys with per-block minimums |
+| Long pieces | Same rescan: cost grows with the square of the length (14 MiB/s on long runs) | Same backtracking search | Overlapping windows, stitched and cached (954 MiB/s on long runs) |
+| Counting | Encodes, then takes the length | Separate count function | Separate count function; long pieces counted in bounded memory |
+
+### What is new here
+
+The ideas below were designed for this project. They rest on one published fact, and that source is credited:
+
+- **The stitch property** (not ours). The [`bpe` crate README](https://github.com/github/rust-gems/tree/main/crates/bpe)
+  notes that if two exact encodings of overlapping text contain the same token at the same byte position, they can
+  be joined at that token and the result is exact. The `bpe` crate uses this inside its own search algorithm. No
+  code from it is used here.
+- **Independent overlapping windows.** magi-toks applies the property differently: it cuts a long piece into
+  short windows, encodes each one with the ordinary short-piece merge, and joins neighbouring windows at the first
+  token both agree on. Each window costs a few microseconds and needs no special data structure. If a stretch has
+  no join point, the window doubles; past 4,096 bytes the whole piece goes to an exact heap merge, so the result is
+  always exact.
+- **Window cache with full byte comparison.** Repetitive text (`aaaa…`, `ababab…`, repeated punctuation, 300,000
+  spaces) produces the same window bytes again and again. A small cache, cleared on every call, reuses earlier
+  window encodings. A hit is accepted only after the bytes are compared in full, so a hash collision cannot produce
+  a wrong token. This is why long runs are about 6× faster than bpe-openai and 67× faster than tiktoken-rs.
+- **Boundary-aligned windows.** Each window starts where a token of the result so far starts, so its first merges
+  repeat ones already done and the join point is usually found within the first few tokens.
+- **Streaming finalization.** A window can only reach a fixed distance back (640 bytes), so every token that ends
+  further back can never change. Those tokens are handed out in batches, which lets `count_ordinary` count a piece
+  of any length in constant extra memory (13 MiB above the text, measured from 16 to 128 MiB pieces).
+- **Packed-key short merge.** For pieces of 32–128 bytes, each part stays in place, linked to its neighbours, and
+  carries one 32-bit key: merge rank in the high bits, position in the low bits. The smallest key is then the
+  correct next merge, including the leftmost-first tie rule, without a separate tie check. A minimum is kept per
+  block of 32 keys, and a merge changes at most three keys, so each step rescans at most three blocks plus the
+  four block minimums. Shorter pieces use a simple shift-down merge, which measured faster at that size.
+- **Compile-time pair table over every split.** `build.rs` records the rank of every way each token can be split
+  into two tokens (446,189 pairs), so one probe answers "do these two tokens merge, and into what?" during merging.
+
+### Why it is better
+
+- **Same answer, every time.** Exactness is checked against tiktoken-rs on about 100 MB of text, every Unicode
+  scalar, 200,000 random strings and adversarial long pieces, with zero mismatches. No speed-up is kept unless
+  this passes.
+- **Faster on ordinary text:** about 6× tiktoken-rs and 3× bpe-openai on source code, transcripts and the shared
+  fixture.
+- **No cliff on long pieces.** Long single pieces that make tiktoken-rs slow down sharply, such as long runs of one
+  character or a short pattern, stay fast, and counting them does not need memory for the tokens.
+- **No start-up cost.** Short-lived processes, such as command-line tools and hooks, do not pay 80–170 ms to load
+  a vocabulary.
+
+### Where it is not better
+
+- Long pieces of random CJK text from a few characters: 4.4 ms against bpe-openai's 2.5 ms per 240 KB.
+- Only `o200k_base`. bpe-openai and tiktoken-rs support more encodings.
+- Benchmarks come from one machine under background load (see [Caveats](#caveats)).
 
 ## Quick start
 
@@ -56,8 +118,8 @@ assert_eq!(*with_special.last().unwrap(), magi_toks::END_OF_TEXT);
 assert_eq!(magi_toks::decode(&ids).as_deref(), Some(text));
 ```
 
-There is no setup step. The first call is as fast as every later call, because all tables are built at compile
-time (see [Startup](#startup)).
+There is no setup step: all tables are built at compile time and embedded in the binary (see [Startup](#startup)).
+The first call still pays for cold caches and for paging in the parts of the tables it touches.
 
 ## API
 
@@ -135,11 +197,13 @@ Each piece goes through one of three paths, chosen by its length:
 
 1. **Whole-token lookup.** Most pieces are a single vocabulary token. One vocabulary-table probe returns the ID,
    with no merging.
-2. **Short pieces (≤ 128 bytes).** Fixed-size arrays on the stack hold the current tokens and the merge rank of
-   each adjacent pair. Each step finds the minimum rank with two simple passes: a minimum, then the first position
-   with that rank, which keeps leftmost tie-breaking. The step then merges the pair, shifts the arrays and updates
-   the two neighbouring ranks. For short inputs this beats a heap: no allocation, data stays in cache, and the
-   compiler vectorises the scans. 128 bytes is also the longest token in `o200k_base`.
+2. **Short pieces (≤ 128 bytes).** Fixed-size arrays on the stack, no allocation. Pieces under 32 bytes keep their
+   tokens packed: each step finds the minimum rank with a vectorised minimum and then the first position with that
+   rank (leftmost tie-breaking), merges the pair, and shifts the rest down. Longer pieces leave each part in the
+   slot of its first byte, linked to its neighbours, so a merge moves nothing. Each part's key packs its merge rank
+   above its position, so the smallest key is the lowest rank and, among equal ranks, the leftmost pair. A minimum
+   is kept for each block of 32 keys; a merge changes at most three keys, so only their blocks are rescanned.
+   128 bytes is also the longest token in `o200k_base`.
 3. **Long pieces (> 128 bytes).** Overlapping windows, described next.
 
 #### Long pieces: overlapping windows
@@ -154,7 +218,7 @@ property of BPE noted in the [`bpe` crate README](https://github.com/github/rust
 
 The loop:
 
-1. Encode the first 64-byte window exactly (short path).
+1. Encode the first 128-byte window exactly (short path).
 2. Start the next window at a token boundary of the current result, reaching back about 1/8 of the window size.
    Encode it exactly.
 3. Look for a **stitch point**: a token with the same ID and the same end offset in both encodings. Both lists of
@@ -162,18 +226,31 @@ The loop:
 4. If found, keep the current result up to that token, append the window's tokens after it, and move forward.
 5. If not found, double the window size and try again, up to 4,096 bytes. If 4,096 bytes still has no stitch
    point, encode the whole piece with the exact heap merge. This fallback is a safety net.
-6. After each successful stitch, the window size goes back to 64 bytes, because hard stretches are usually local.
+6. After each successful stitch, the window size goes back to 128 bytes, because hard stretches are usually local.
 
 Two details make this fast on repetitive text:
 
 - **Window cache.** A 16-slot cache, indexed by a hash of the window's bytes, stores recent window encodings. A hit
-  counts only after a **full byte comparison**, never on the hash alone. Periodic text such as `"0123456789" × N`
-  or `"!@#$%^&*()" × N` reuses earlier merges at every phase of the period. The cache lives for one call only;
-  there is no state between calls.
+  counts only after a **full byte comparison**, never on the hash alone. Periodic text such as `ababab…` or
+  `"!@#$%^&*()" × N` reuses earlier merges at every phase of the period. The cache lives for one call only;
+  there is no state between calls. The window size decides how windows of periodic text line up, so it decides
+  whether they recur: on `long_runs`, 128 bytes beat 64, and 48 or 96 bytes were about six times slower.
 - **Boundary-aligned starts.** A window that starts where a token of the current result starts usually repeats
   the same merges, so the stitch point appears early.
 
-The previous heap-only merge stays in the code. It is the fallback, and it merges windows over 128 bytes.
+Random text from a small alphabet finds stitch points just as quickly, but its windows never repeat, so every
+window is merged from scratch. That merge cost is what remains in the slow cases below.
+
+**Bounded memory.** A window never starts more than 640 bytes (the largest overlap plus one token) before the
+end of the text encoded so far, so tokens ending further back are final. Every 4,096 pending tokens, the final
+ones are handed out: appended to the output by `encode_ordinary`, only counted by `count_ordinary`. Working memory
+for a long piece is therefore bounded regardless of its length: at most about 0.6 MiB (16 cached windows of up to
+4,096 bytes plus pending tokens), and usually a few KiB. The one exception is the whole-piece heap fallback, which
+needs memory proportional to the piece; when it runs, `encode_ordinary` removes the tokens it already appended
+for that piece.
+
+The heap merge stays in the code as the fallback, and it merges windows over 128 bytes. It stores positions as
+`u32` and switches to `usize` for pieces of 4 GiB or more.
 
 ## Verification
 
@@ -185,22 +262,25 @@ regex, run through `fancy-regex` 0.17.0. For every text it checks:
 - `decode` round trip;
 - `encode_with_special_tokens` IDs and `count_with_special_tokens`.
 
-It also checks that each valid-UTF-8 vocabulary token that forms a single piece encodes to its own ID.
+It also checks that each valid-UTF-8 vocabulary token that forms a single piece (198,424 tokens) encodes to its
+own ID.
 
 | Suite | Texts | Bytes | What it covers |
 | --- | ---: | ---: | --- |
 | `edges` | 883 | 109,014 | Contractions, `ſ`, title-case letters, combining marks, NBSP and ideographic space, CR/LF mixes, special-token fragments, runs of 1–140 characters of six kinds |
 | `unicode_sweep` | 6,370 | 52,020,015 | Every Unicode scalar value in six contexts that exercise each regex alternative, plus mixed triples of code points |
 | `fuzz` | 200,000 | 14,861,094 | Seeded random strings from a hostile alphabet (contractions, marks, emoji, special-token parts, whitespace kinds) |
-| `source_7` / `_48` / `_4096` | 1.2M / 176k / 2k | 8,453,332 each | Real Rust and C source, cut at three chunk sizes |
+| `source_7` / `_48` / `_4096` | 869k / 127k / 1.5k | 6,082,527 each | Source files under `MAGI_TOKS_SOURCE` (here the `toks` repository), cut at three chunk sizes |
 | `multilingual_256` | 1,921 | 491,200 | CJK, Hangul, Cyrillic, Greek, Arabic, Devanagari, Thai, emoji ZWJ sequences |
 | `fixture_200k` | 1 | 938,163 | Shared `o200k_base` comparison fixture |
 | `long_runs` | 9 | 1,760,000 | 300k `a`, 300k spaces, repeated digits, `ab`, combining marks, punctuation, CJK, cycles |
 | `long_random` | 988 | 2,172,677 | Long single pieces from small alphabets (letters, CJK, marks, punctuation, whitespace) with lengths around the window sizes (129 … 20,000) and runs with one interruption |
+| `long_unrepeated` | 131 | 713,408 | Seeded random `a`/`b`, CJK and punctuation pieces, 129 bytes to 240 KB: no window ever repeats |
 | `session_snapshots` | 20 | 11,850,632 | Real coding-agent session transcripts |
-| `token_identity` | 198,436 tokens | — | Each single-piece vocabulary token encodes to itself |
+| `token_identity` | 198,424 tokens | — | Each valid-UTF-8, single-piece vocabulary token encodes to itself |
 
-Latest result: **0 mismatches in every suite**. The run takes about 18 seconds on an Apple M5 Pro.
+`fixture_200k` and `session_snapshots` run only when `MAGI_TOKS_ASSETS` is set. Latest result, with both
+fixtures and the `toks` source tree: **0 mismatches in every suite**, in about 17 seconds on an Apple M5 Pro.
 
 The window encoder was also checked separately: its counts match `bpe-openai` on random long pieces of up to
 240 KB.
@@ -208,52 +288,58 @@ The window encoder was also checked separately: its counts match `bpe-openai` on
 ## Benchmarks
 
 `magi-toks-bench bench` measures count and encode throughput for magi-toks, tiktoken-rs 0.12.0 and bpe-openai 0.3.2
-on the same inputs. Before timing, it checks that all three return the same total token count. Each figure is the
-median of 5 trials of at least 150 ms each.
+on the same inputs. Before timing, it checks that all three return the same total token count. The five jobs
+(magi count, magi encode, bpe-openai count, bpe-openai encode, tiktoken encode) run in five rounds of at least
+150 ms each, in a rotated order each round; each figure is the job's median round. tiktoken-rs has no separate
+count, so its encode figure is used for both.
 
-Latest run, count throughput in MiB/s (the tool prints the label "MB/s", but the unit is MiB/s):
+Latest run, count throughput in MiB/s:
 
 | Workload | MiB | magi-toks | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `fixture_200k` | 0.895 | 247.9 | 37.3 | 76.9 | 6.65× | 3.23× |
-| `source_1MiB` | 1.000 | 244.3 | 37.8 | 78.0 | 6.46× | 3.13× |
-| `source_48B_chunks` | 0.250 | 221.4 | 32.7 | 74.8 | 6.77× | 2.96× |
-| `source_256B_chunks` | 0.250 | 278.0 | 37.6 | 82.1 | 7.39× | 3.38× |
-| `multilingual` | 0.468 | 122.4 | 42.9 | 95.9 | 2.86× | 1.28× |
-| `long_runs` | 1.678 | 536.7 | 14.1 | 162.1 | 38.06× | 3.31× |
-| `session_snapshots` | 30.748 | 251.5 | 38.5 | 81.2 | 6.53× | 3.10× |
+| `fixture_200k` | 0.895 | 253.8 | 39.3 | 81.8 | 6.46× | 3.10× |
+| `source_1MiB` | 1.000 | 203.1 | 32.6 | 59.5 | 6.24× | 3.41× |
+| `source_48B_chunks` | 0.250 | 176.2 | 27.1 | 53.3 | 6.49× | 3.31× |
+| `source_256B_chunks` | 0.250 | 212.2 | 29.6 | 58.0 | 7.18× | 3.66× |
+| `multilingual` | 0.468 | 130.9 | 43.0 | 96.6 | 3.04× | 1.35× |
+| `long_runs` | 1.678 | 954.1 | 14.1 | 163.7 | 67.46× | 5.83× |
+| `long_unrepeated` | 0.680 | 54.0 | 14.5 | 43.5 | 3.71× | 1.24× |
+| `session_snapshots` | 30.748 | 251.9 | 39.5 | 80.2 | 6.38× | 3.14× |
 
-Encode throughput follows the same pattern: 2.84–7.24× tiktoken-rs on ordinary text and 1.32–3.53× bpe-openai.
+Encode throughput follows the same pattern: 3.01–6.56× tiktoken-rs and 1.41–3.95× bpe-openai on the ordinary-text
+workloads.
 
-Before the window encoder, `long_runs` counted at 19.5 MiB/s, about 8× slower than bpe-openai.
+Source workloads use the `toks` source tree; with the default source (this repository) the numbers differ.
 
 ### Where magi-toks is still slower
 
-Long single pieces with no repetition, where every window must be merged from scratch (magi-toks / bpe-openai,
-milliseconds per call):
+Long single pieces of random CJK, where every window must be merged from scratch and each character starts as
+three byte-parts (milliseconds per call, separate probe program, counts checked against bpe-openai):
 
 | Input | magi-toks | bpe-openai |
 | --- | ---: | ---: |
-| 240 KB random CJK from 8 characters | 8.2 | 2.5 |
-| 200 KB random `a`/`b` | 6.2 | 4.7 |
-| 2,000 random `a`/`b` pieces, 129–1,024 bytes | 36.3 | 24.1 |
+| 240 KB random CJK from 8 characters | 4.4 | 2.5 |
 
-Random pieces drawn from 26 or 52 letters are already faster than bpe-openai. Speeding up these cases is the next
-area of work.
+For comparison, from the same probe run: 200 KB random `a`/`b` took 3.3 ms (bpe-openai 4.2), 2,000 random `a`/`b`
+pieces of 129–1,024 bytes took 19.5 ms (bpe-openai 23.6), and random lowercase, letters and punctuation took about
+half of bpe-openai's time.
 
 ### Startup
 
 magi-toks needs no runtime initialisation. On a contended machine, the first count after process start took
 0.107 ms, against 166 ms for tiktoken-rs and 78 ms for bpe-openai (vocabulary loading). Process launch time is not
-included. Memory (RSS) has not been measured yet.
+included, and the first call is still slower than later ones (cold caches, table pages faulted in on first use).
+
+Peak memory, one random `a`/`b` piece (`/usr/bin/time -l`, separate probe program): counting 16, 64 and 128 MiB
+pieces peaked at 29, 77 and 141 MiB of RSS, so it adds a constant 13 MiB on top of the text (embedded tables
+paged in plus working buffers). Encoding the 64 MiB piece peaked at 164 MiB, because its 22.9 million IDs take
+87 MiB. Memory for whole-text workloads and for other tokenizers has not been measured.
 
 ### Caveats
 
-- All figures come from one ARM64 Apple M5 Pro with other work running in the background. Treat them as
-  directional until they are repeated on a quiet machine with the tokenizers run in alternating order.
+- All figures come from one ARM64 Apple M5 Pro with other work running in the background. Rotated job order
+  limits drift between tokenizers, but repeated runs still vary by about 10%.
 - The native `toks` C library has not been benchmarked yet.
-- The harness reads fixtures and source trees from hard-coded local paths (see
-  [Known limitations](#known-limitations)).
 
 ## Repository layout
 
@@ -272,13 +358,14 @@ tools/gen-unicode/           standalone generator for src/unicode_classes.rs (pi
 
 ## Development
 
-Requirements: Rust 1.85 or later (edition 2024). Development used Rust 1.98.1.
+Requirements: the library builds with Rust 1.88.0 (checked); older versions are untested. The benchmark harness
+uses newer standard-library APIs. Development used Rust 1.98.1.
 
 ```sh
 # Library
 cargo build --release
 
-# Exact differential verification against tiktoken-rs and fancy-regex (about 18 s)
+# Exact differential verification against tiktoken-rs and fancy-regex (about 17 s)
 cargo run --release -p magi-toks-bench -- verify
 
 # Throughput, all three tokenizers; an optional filter matches workload names
@@ -292,23 +379,25 @@ cargo run --release -p magi-toks-bench -- startup magi        # or tiktoken, bpe
 cd tools/gen-unicode && cargo run --release
 ```
 
+Harness inputs, both optional:
+
+- `MAGI_TOKS_SOURCE`: source trees to cut into chunks, in the platform's path-list syntax. Default: this
+  repository. Files under dot-directories and `target` are skipped; at most about 4 MiB is read per tree.
+- `MAGI_TOKS_ASSETS`: a directory containing `o200k_base-200k.txt` and `session-compacted-500.json`. Unset: those
+  suites are skipped. Set but a file is missing or malformed: the command fails.
+
 The release profile uses fat LTO and one codegen unit. Build scripts are compiled with `opt-level = 3`, so table
 generation stays fast in debug builds as well.
 
-The project has no unit tests by design. Correctness comes from the differential `verify` command. Run it after
-any change to the scanner, tables or merge code.
+Correctness is checked by the differential `verify` command rather than unit tests. Run it after any change to
+the scanner, tables or merge code.
 
 ## Known limitations
 
-- **Portability of the harness.** `bench/src/main.rs` reads `COMPARISON_ASSETS` and `SOURCE_ROOTS` from absolute
-  paths on the author's machine. If the session fixture is missing, its suite is skipped, but the other fixtures
-  are required.
-- **Benchmark labels.** Throughput is printed as "MB/s" but is MiB/s. The token-identity line counts all
-  valid-UTF-8 tokens, but only single-piece tokens are checked.
-- **Pieces over 4 GiB.** The heap merge stores byte positions as `u32`.
-- **Counting long pieces allocates.** `count_ordinary` builds the full token list for pieces over 128 bytes, then
-  takes its length.
-- **Slow cases.** Long random pieces from very small alphabets (see above).
+- **Slow case.** Long random pieces of CJK text from a small set of characters (see above).
+- **Heap fallback memory.** If a stretch of a long piece has no stitch point within 4,096 bytes, the whole piece
+  is merged with the heap, which needs memory proportional to its length. How often real text reaches this path
+  has not been measured.
 - **One encoding.** Only `o200k_base`. Other encodings (`cl100k_base`, `o200k_harmony`) and model-name routing are
   not implemented.
 

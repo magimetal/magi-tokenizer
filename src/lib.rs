@@ -39,7 +39,8 @@ pub fn encode_ordinary_into(text: &str, tokens: &mut Vec<u32>) {
     }
 }
 
-/// Number of tokens `encode_ordinary(text)` returns, without allocating the token list.
+/// Number of tokens `encode_ordinary(text)` returns, without building the token list. Working memory per piece is
+/// bounded, except when a long piece falls back to the whole-piece heap merge.
 pub fn count_ordinary(text: &str) -> usize {
     pieces(text).map(|piece| bpe::count_piece(piece.as_bytes())).sum()
 }

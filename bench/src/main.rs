@@ -1,11 +1,11 @@
-// Differential verification and benchmarks for magi-toks against tiktoken-rs (reference) and bpe-openai.
+// Differential verification and benchmarks for magi-tokenizer against tiktoken-rs (reference) and bpe-openai.
 //
-//   cargo run --release -p magi-toks-bench -- verify   # exact pieces/ids/counts/decode vs references
-//   cargo run --release -p magi-toks-bench -- bench    # throughput, all three tokenizers
-//   cargo run --release -p magi-toks-bench -- startup <magi|tiktoken|bpe-openai>  # one first-call timing
+//   cargo run --release -p magi-tokenizer-bench -- verify   # exact pieces/ids/counts/decode vs references
+//   cargo run --release -p magi-tokenizer-bench -- bench    # throughput, all three tokenizers
+//   cargo run --release -p magi-tokenizer-bench -- startup <magi|tiktoken|bpe-openai>  # one first-call timing
 //
-// Inputs: MAGI_TOKS_SOURCE lists source trees (path-list syntax, default: this repository) to cut into chunks.
-// MAGI_TOKS_ASSETS names a directory with o200k_base-200k.txt and session-compacted-500.json; without it those
+// Inputs: MAGI_TOKENIZER_SOURCE lists source trees (path-list syntax, default: this repository) to cut into chunks.
+// MAGI_TOKENIZER_ASSETS names a directory with o200k_base-200k.txt and session-compacted-500.json; without it those
 // suites are skipped.
 
 use std::hint::black_box;
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
         Some("verify") => verify(),
         Some("bench") => bench(args.get(1).map(String::as_str)),
         Some("startup") => startup(args.get(1).map(String::as_str).unwrap_or("magi")),
-        _ => Err("usage: magi-toks-bench verify | bench [filter] | startup <magi|tiktoken|bpe-openai>".into()),
+        _ => Err("usage: magi-tokenizer-bench verify | bench [filter] | startup <magi|tiktoken|bpe-openai>".into()),
     }
 }
 
@@ -84,7 +84,7 @@ fn collect_source_text(root: &Path, out: &mut String, limit: usize) {
 }
 
 fn source_text() -> String {
-    let roots: Vec<PathBuf> = match env::var_os("MAGI_TOKS_SOURCE") {
+    let roots: Vec<PathBuf> = match env::var_os("MAGI_TOKENIZER_SOURCE") {
         Some(roots) => env::split_paths(&roots).collect(),
         None => vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("..")],
     };
@@ -96,9 +96,9 @@ fn source_text() -> String {
     text
 }
 
-/// `Ok(None)` when MAGI_TOKS_ASSETS is unset; an error when it is set but the asset is missing or malformed.
+/// `Ok(None)` when MAGI_TOKENIZER_ASSETS is unset; an error when it is set but the asset is missing or malformed.
 fn comparison_asset(name: &str) -> Result<Option<Vec<u8>>> {
-    let Some(dir) = env::var_os("MAGI_TOKS_ASSETS") else { return Ok(None) };
+    let Some(dir) = env::var_os("MAGI_TOKENIZER_ASSETS") else { return Ok(None) };
     let path = PathBuf::from(dir).join(name);
     Ok(Some(fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?))
 }
@@ -203,10 +203,10 @@ impl References {
         })
     }
 
-    /// Ok(()) when magi-toks agrees exactly with the references on `text`; otherwise a description.
+    /// Ok(()) when magi-tokenizer agrees exactly with the references on `text`; otherwise a description.
     fn check(&self, text: &str) -> std::result::Result<(), String> {
         let expected_pieces: Vec<&str> = self.regex.find_iter(text).map(|m| m.unwrap().as_str()).collect();
-        let pieces: Vec<&str> = magi_toks::pieces(text).collect();
+        let pieces: Vec<&str> = magi_tokenizer::pieces(text).collect();
         if pieces != expected_pieces {
             let first = pieces.iter().zip(&expected_pieces).position(|(a, b)| a != b).unwrap_or(pieces.len());
             return Err(format!(
@@ -216,19 +216,19 @@ impl References {
             ));
         }
         let expected = self.tiktoken.encode_ordinary(text);
-        let ids = magi_toks::encode_ordinary(text);
+        let ids = magi_tokenizer::encode_ordinary(text);
         if ids != expected {
             return Err(format!("ordinary ids differ: got {} tokens, expected {}", ids.len(), expected.len()));
         }
-        if magi_toks::count_ordinary(text) != expected.len() {
+        if magi_tokenizer::count_ordinary(text) != expected.len() {
             return Err("count_ordinary differs".into());
         }
-        if magi_toks::decode(&ids).as_deref() != Some(text) {
+        if magi_tokenizer::decode(&ids).as_deref() != Some(text) {
             return Err("decode does not round-trip".into());
         }
         let expected_special = self.tiktoken.encode_with_special_tokens(text);
-        if magi_toks::encode_with_special_tokens(text) != expected_special
-            || magi_toks::count_with_special_tokens(text) != expected_special.len()
+        if magi_tokenizer::encode_with_special_tokens(text) != expected_special
+            || magi_tokenizer::count_with_special_tokens(text) != expected_special.len()
         {
             return Err("special-token encoding differs".into());
         }
@@ -256,7 +256,7 @@ fn verify() -> Result<()> {
     }
     match session_snapshots()? {
         Some(snapshots) => suites.push(("session_snapshots", snapshots.into_iter().step_by(25).collect())),
-        None => println!("MAGI_TOKS_ASSETS not set: skipping fixture_200k / session_snapshots"),
+        None => println!("MAGI_TOKENIZER_ASSETS not set: skipping fixture_200k / session_snapshots"),
     }
     let mut failures = 0;
     for (name, texts) in &suites {
@@ -400,12 +400,12 @@ fn long_unrepeated_pieces() -> Vec<String> {
 
 fn check_every_token_round_trips() -> Result<()> {
     let mut checked = 0;
-    for id in 0..magi_toks::ORDINARY_TOKEN_COUNT as u32 {
-        let bytes = magi_toks::token_bytes(id).ok_or("missing token")?;
+    for id in 0..magi_tokenizer::ORDINARY_TOKEN_COUNT as u32 {
+        let bytes = magi_tokenizer::token_bytes(id).ok_or("missing token")?;
         if let Ok(text) = std::str::from_utf8(bytes)
-            && magi_toks::pieces(text).count() == 1
+            && magi_tokenizer::pieces(text).count() == 1
         {
-            if magi_toks::encode_ordinary(text) != [id] {
+            if magi_tokenizer::encode_ordinary(text) != [id] {
                 return Err(format!("token {id} ({text:?}) does not encode to itself").into());
             }
             checked += 1;
@@ -468,19 +468,19 @@ fn bench(filter: Option<&str>) -> Result<()> {
             continue;
         }
         let expected: usize = texts.iter().map(|text| tiktoken.encode_ordinary(text).len()).sum();
-        let magi_count: usize = texts.iter().map(|text| magi_toks::count_ordinary(text)).sum();
+        let magi_count: usize = texts.iter().map(|text| magi_tokenizer::count_ordinary(text)).sum();
         let bpe_count: usize = texts.iter().map(|text| bpe_openai.count(text.as_str())).sum();
-        assert_eq!(magi_count, expected, "{name}: magi-toks count differs");
+        assert_eq!(magi_count, expected, "{name}: magi-tokenizer count differs");
         assert_eq!(bpe_count, expected, "{name}: bpe-openai count differs");
         let bytes: usize = texts.iter().map(String::len).sum();
         let mib = bytes as f64 / (1 << 20) as f64;
         let throughput = |micros: f64| mib / (micros / 1e6);
         let sum_over = |f: &dyn Fn(&str) -> usize| texts.iter().map(|text| f(black_box(text))).sum::<usize>();
         let times = time_per_call(&[
-            &|| sum_over(&|text| magi_toks::count_ordinary(text)),
+            &|| sum_over(&|text| magi_tokenizer::count_ordinary(text)),
             &|| sum_over(&|text| tiktoken.encode_ordinary(text).len()),
             &|| sum_over(&|text| bpe_openai.count(text)),
-            &|| sum_over(&|text| magi_toks::encode_ordinary(text).len()),
+            &|| sum_over(&|text| magi_tokenizer::encode_ordinary(text).len()),
             &|| sum_over(&|text| bpe_openai.encode(text).len()),
         ]);
         // tiktoken has no count; its encode serves as both.
@@ -508,7 +508,7 @@ fn startup(which: &str) -> Result<()> {
     let text = "Hello, world! This is the first call after process start.";
     let start = Instant::now();
     let count = match which {
-        "magi" => magi_toks::count_ordinary(text),
+        "magi" => magi_tokenizer::count_ordinary(text),
         "tiktoken" => tiktoken_rs::o200k_base_singleton().encode_ordinary(text).len(),
         "bpe-openai" => bpe_openai::o200k_base().count(text),
         other => return Err(format!("unknown tokenizer {other}").into()),

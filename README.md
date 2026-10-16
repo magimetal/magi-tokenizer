@@ -1,8 +1,8 @@
-# magi-toks
+# magi-tokenizer
 
 An exact, fast Rust tokenizer for OpenAI's `o200k_base` encoding.
 
-For every input, magi-toks produces the same token IDs as
+For every input, magi-tokenizer produces the same token IDs as
 [tiktoken](https://github.com/openai/tiktoken) (`encode_ordinary` and `encode_with_special_tokens`). Speed is the
 goal, but exactness is required. A faster result with one wrong token ID is a failure.
 
@@ -37,9 +37,9 @@ goal, but exactness is required. A faster result with one wrong token ID is a fa
 
 Every exact `o200k_base` tokenizer must compute the same result: split text into pieces with the same regex, then
 repeatedly merge the lowest-rank adjacent pair in each piece. The projects differ in how they compute it. This
-table compares magi-toks with the two Rust tokenizers it is benchmarked against.
+table compares magi-tokenizer with the two Rust tokenizers it is benchmarked against.
 
-| Stage | tiktoken-rs | bpe-openai | magi-toks |
+| Stage | tiktoken-rs | bpe-openai | magi-tokenizer |
 | --- | --- | --- | --- |
 | Vocabulary setup | Decoded and hashed at run time (166 ms first call) | Built at run time (78 ms first call) | Built by `build.rs` into embedded hash tables; nothing runs at start (0.1 ms first call) |
 | Pretokenizer | `fancy-regex` with lookahead | `regex-automata` with a lookahead workaround | Hand-written scanner (derived from `toks`) with Unicode 16 classes generated from the same `regex` crate version as the reference |
@@ -55,7 +55,7 @@ The ideas below were designed for this project. They rest on one published fact,
   notes that if two exact encodings of overlapping text contain the same token at the same byte position, they can
   be joined at that token and the result is exact. The `bpe` crate uses this inside its own search algorithm. No
   code from it is used here.
-- **Independent overlapping windows.** magi-toks applies the property differently: it cuts a long piece into
+- **Independent overlapping windows.** magi-tokenizer applies the property differently: it cuts a long piece into
   short windows, encodes each one with the ordinary short-piece merge, and joins neighbouring windows at the first
   token both agree on. Each window costs a few microseconds and needs no special data structure. If a stretch has
   no join point, the window doubles; past 4,096 bytes the whole piece goes to an exact heap merge, so the result is
@@ -101,21 +101,21 @@ The crate is not on crates.io. Use a path or git dependency:
 
 ```toml
 [dependencies]
-magi-toks = { path = "../magi-toks" }
+magi-tokenizer = { path = "../magi-tokenizer" }
 ```
 
 ```rust
 let text = "Hello, world! <|endoftext|>";
 
 // Treat special-token text as ordinary text (tiktoken `encode_ordinary`).
-let ids = magi_toks::encode_ordinary(text);
-assert_eq!(magi_toks::count_ordinary(text), ids.len());
+let ids = magi_tokenizer::encode_ordinary(text);
+assert_eq!(magi_tokenizer::count_ordinary(text), ids.len());
 
 // Recognise special tokens (tiktoken `encode_with_special_tokens`).
-let with_special = magi_toks::encode_with_special_tokens(text);
-assert_eq!(*with_special.last().unwrap(), magi_toks::END_OF_TEXT);
+let with_special = magi_tokenizer::encode_with_special_tokens(text);
+assert_eq!(*with_special.last().unwrap(), magi_tokenizer::END_OF_TEXT);
 
-assert_eq!(magi_toks::decode(&ids).as_deref(), Some(text));
+assert_eq!(magi_tokenizer::decode(&ids).as_deref(), Some(text));
 ```
 
 There is no setup step: all tables are built at compile time and embedded in the binary (see [Startup](#startup)).
@@ -150,7 +150,7 @@ Tokenization has two stages, and both must match tiktoken exactly:
    rank is merged, the leftmost pair if ranks tie, until no adjacent pair forms a vocabulary token. In
    `o200k_base`, a token's rank is its ID.
 
-magi-toks keeps those semantics and changes how each stage is computed.
+magi-tokenizer keeps those semantics and changes how each stage is computed.
 
 ### Build-time tables (`build.rs`, `src/table_hash.rs`, `src/tables.rs`)
 
@@ -173,7 +173,7 @@ both sides use identical code.
 ### Pretokenizer (`src/scanner.rs`, `src/unicode_classes.rs`)
 
 The o200k regex uses look-ahead (`\s+(?!\S)`), so tiktoken runs it with `fancy-regex`, a backtracking engine. That
-is slow. magi-toks replaces it with a hand-written matcher that tries the seven alternatives in the same order and
+is slow. magi-tokenizer replaces it with a hand-written matcher that tries the seven alternatives in the same order and
 reproduces the same backtracking results, including:
 
 - case-insensitive contractions, where `'ſ` must not match `'s`;
@@ -209,7 +209,7 @@ Each piece goes through one of three paths, chosen by its length:
 #### Long pieces: overlapping windows
 
 A heap-based merge costs O(n log n) per piece and is slow on long repetitive runs, such as 300,000 spaces, `aaaa…`
-or `ababab…`. magi-toks encodes a long piece as a series of short windows and joins them. The method rests on a
+or `ababab…`. magi-tokenizer encodes a long piece as a series of short windows and joins them. The method rests on a
 property of BPE noted in the [`bpe` crate README](https://github.com/github/rust-gems/tree/main/crates/bpe)
 ("Properties of BPE"):
 
@@ -254,7 +254,7 @@ The heap merge stays in the code as the fallback, and it merges windows over 128
 
 ## Verification
 
-`magi-toks-bench verify` compares magi-toks with **tiktoken-rs 0.12.0** (the reference) and with the original
+`magi-tokenizer-bench verify` compares magi-tokenizer with **tiktoken-rs 0.12.0** (the reference) and with the original
 regex, run through `fancy-regex` 0.17.0. For every text it checks:
 
 - the pieces, against the reference regex;
@@ -270,7 +270,7 @@ own ID.
 | `edges` | 883 | 109,014 | Contractions, `ſ`, title-case letters, combining marks, NBSP and ideographic space, CR/LF mixes, special-token fragments, runs of 1–140 characters of six kinds |
 | `unicode_sweep` | 6,370 | 52,020,015 | Every Unicode scalar value in six contexts that exercise each regex alternative, plus mixed triples of code points |
 | `fuzz` | 200,000 | 14,861,094 | Seeded random strings from a hostile alphabet (contractions, marks, emoji, special-token parts, whitespace kinds) |
-| `source_7` / `_48` / `_4096` | 869k / 127k / 1.5k | 6,082,527 each | Source files under `MAGI_TOKS_SOURCE` (here the `toks` repository), cut at three chunk sizes |
+| `source_7` / `_48` / `_4096` | 869k / 127k / 1.5k | 6,082,527 each | Source files under `MAGI_TOKENIZER_SOURCE` (here the `toks` repository), cut at three chunk sizes |
 | `multilingual_256` | 1,921 | 491,200 | CJK, Hangul, Cyrillic, Greek, Arabic, Devanagari, Thai, emoji ZWJ sequences |
 | `fixture_200k` | 1 | 938,163 | Shared `o200k_base` comparison fixture |
 | `long_runs` | 9 | 1,760,000 | 300k `a`, 300k spaces, repeated digits, `ab`, combining marks, punctuation, CJK, cycles |
@@ -279,7 +279,7 @@ own ID.
 | `session_snapshots` | 20 | 11,850,632 | Real coding-agent session transcripts |
 | `token_identity` | 198,424 tokens | — | Each valid-UTF-8, single-piece vocabulary token encodes to itself |
 
-`fixture_200k` and `session_snapshots` run only when `MAGI_TOKS_ASSETS` is set. Latest result, with both
+`fixture_200k` and `session_snapshots` run only when `MAGI_TOKENIZER_ASSETS` is set. Latest result, with both
 fixtures and the `toks` source tree: **0 mismatches in every suite**, in about 17 seconds on an Apple M5 Pro.
 
 The window encoder was also checked separately: its counts match `bpe-openai` on random long pieces of up to
@@ -287,7 +287,7 @@ The window encoder was also checked separately: its counts match `bpe-openai` on
 
 ## Benchmarks
 
-`magi-toks-bench bench` measures count and encode throughput for magi-toks, tiktoken-rs 0.12.0 and bpe-openai 0.3.2
+`magi-tokenizer-bench bench` measures count and encode throughput for magi-tokenizer, tiktoken-rs 0.12.0 and bpe-openai 0.3.2
 on the same inputs. Before timing, it checks that all three return the same total token count. The five jobs
 (magi count, magi encode, bpe-openai count, bpe-openai encode, tiktoken encode) run in five rounds of at least
 150 ms each, in a rotated order each round; each figure is the job's median round. tiktoken-rs has no separate
@@ -295,7 +295,7 @@ count, so its encode figure is used for both.
 
 Latest run, count throughput in MiB/s:
 
-| Workload | MiB | magi-toks | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
+| Workload | MiB | magi-tokenizer | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `fixture_200k` | 0.895 | 253.8 | 39.3 | 81.8 | 6.46× | 3.10× |
 | `source_1MiB` | 1.000 | 203.1 | 32.6 | 59.5 | 6.24× | 3.41× |
@@ -311,12 +311,12 @@ workloads.
 
 Source workloads use the `toks` source tree; with the default source (this repository) the numbers differ.
 
-### Where magi-toks is still slower
+### Where magi-tokenizer is still slower
 
 Long single pieces of random CJK, where every window must be merged from scratch and each character starts as
 three byte-parts (milliseconds per call, separate probe program, counts checked against bpe-openai):
 
-| Input | magi-toks | bpe-openai |
+| Input | magi-tokenizer | bpe-openai |
 | --- | ---: | ---: |
 | 240 KB random CJK from 8 characters | 4.4 | 2.5 |
 
@@ -326,7 +326,7 @@ half of bpe-openai's time.
 
 ### Startup
 
-magi-toks needs no runtime initialisation. On a contended machine, the first count after process start took
+magi-tokenizer needs no runtime initialisation. On a contended machine, the first count after process start took
 0.107 ms, against 166 ms for tiktoken-rs and 78 ms for bpe-openai (vocabulary loading). Process launch time is not
 included, and the first call is still slower than later ones (cold caches, table pages faulted in on first use).
 
@@ -352,7 +352,7 @@ src/unicode_classes.rs       generated per-code-point class table (do not edit b
 src/bpe.rs                   short-piece, window and heap byte-pair merging
 src/tables.rs                table lookups: vocabulary, pair ranks, byte ranks, token bytes
 src/table_hash.rs            hash functions and table geometry shared with build.rs
-bench/                       magi-toks-bench: differential verification and benchmarks
+bench/                       magi-tokenizer-bench: differential verification and benchmarks
 tools/gen-unicode/           standalone generator for src/unicode_classes.rs (pinned regex versions)
 ```
 
@@ -366,14 +366,14 @@ uses newer standard-library APIs. Development used Rust 1.98.1.
 cargo build --release
 
 # Exact differential verification against tiktoken-rs and fancy-regex (about 17 s)
-cargo run --release -p magi-toks-bench -- verify
+cargo run --release -p magi-tokenizer-bench -- verify
 
 # Throughput, all three tokenizers; an optional filter matches workload names
-cargo run --release -p magi-toks-bench -- bench
-cargo run --release -p magi-toks-bench -- bench long
+cargo run --release -p magi-tokenizer-bench -- bench
+cargo run --release -p magi-tokenizer-bench -- bench long
 
 # First-call time in a fresh process
-cargo run --release -p magi-toks-bench -- startup magi        # or tiktoken, bpe-openai
+cargo run --release -p magi-tokenizer-bench -- startup magi        # or tiktoken, bpe-openai
 
 # Regenerate the Unicode class table (only when the pinned regex versions change)
 cd tools/gen-unicode && cargo run --release
@@ -381,9 +381,9 @@ cd tools/gen-unicode && cargo run --release
 
 Harness inputs, both optional:
 
-- `MAGI_TOKS_SOURCE`: source trees to cut into chunks, in the platform's path-list syntax. Default: this
+- `MAGI_TOKENIZER_SOURCE`: source trees to cut into chunks, in the platform's path-list syntax. Default: this
   repository. Files under dot-directories and `target` are skipped; at most about 4 MiB is read per tree.
-- `MAGI_TOKS_ASSETS`: a directory containing `o200k_base-200k.txt` and `session-compacted-500.json`. Unset: those
+- `MAGI_TOKENIZER_ASSETS`: a directory containing `o200k_base-200k.txt` and `session-compacted-500.json`. Unset: those
   suites are skipped. Set but a file is missing or malformed: the command fails.
 
 The release profile uses fat LTO and one codegen unit. Build scripts are compiled with `opt-level = 3`, so table
@@ -403,7 +403,7 @@ the scanner, tables or merge code.
 
 ## Provenance and licensing
 
-magi-toks is licensed under the [Apache License 2.0](LICENSE). [NOTICE](NOTICE) carries the attributions below,
+magi-tokenizer is licensed under the [Apache License 2.0](LICENSE). [NOTICE](NOTICE) carries the attributions below,
 including the full MIT notice for the tiktoken vocabulary.
 
 | Component | Source | Licence |
@@ -412,4 +412,4 @@ including the full MIT notice for the tiktoken vocabulary.
 | Scanner design (`src/scanner.rs`) | [toks](https://github.com/actualcomputer/toks) revision `2ebc390`, `src/core/k3_o200k_c.c` and `kernels.h`, Copyright 2026 Actual Computer Inc., rewritten in Rust | Apache-2.0 |
 | Window stitching property | [`bpe` crate](https://github.com/github/rust-gems/tree/main/crates/bpe) README, "Properties of BPE". Only the property is used; no code from the crate is included. | MIT |
 | Unicode classes | Generated from `regex` 1.12.4 / `regex-syntax` 0.8.11 (Unicode 16 data) | MIT OR Apache-2.0; Unicode License v3 |
-| Everything else | magi-toks | Apache-2.0 |
+| Everything else | magi-tokenizer | Apache-2.0 |

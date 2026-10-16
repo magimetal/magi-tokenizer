@@ -1,11 +1,11 @@
 [package]
-name = "magi-toks-bench"
+name = "magi-tokenizer-bench"
 version = "0.0.0"
 edition = "2024"
 publish = false
 
 [dependencies]
-magi-toks = { path = "./.." }
+magi-tokenizer = { path = "./.." }
 bpe-openai = "=0.3.2"
 tiktoken-rs = "=0.12.0"
 fancy-regex = "=0.17.0"

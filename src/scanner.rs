@@ -10,7 +10,7 @@
 // | \s+
 //
 // Matching order and backtracking follow the scanner design of toks (Apache-2.0, Copyright 2026 Actual
-// Computer Inc.), src/core/k3_o200k_c.c and src/core/kernels.h, rewritten in Rust for magi-toks.
+// Computer Inc.), src/core/k3_o200k_c.c and src/core/kernels.h, rewritten in Rust for magi-tokenizer.
 // Atoms are Unicode scalars; input is valid UTF-8 because callers pass `&str`.
 
 use crate::unicode_classes::{ASCII_CLASSES, BLOCK_CLASSES, BLOCK_INDEX};

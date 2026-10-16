@@ -173,16 +173,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
-name = "magi-toks"
+name = "magi-tokenizer"
 version = "0.1.0"
 
 [[package]]
-name = "magi-toks-bench"
+name = "magi-tokenizer-bench"
 version = "0.0.0"
 dependencies = [
  "bpe-openai",
  "fancy-regex",
- "magi-toks",
+ "magi-tokenizer",
  "regex",
  "regex-syntax",
  "serde_json",

@@ -4,8 +4,9 @@ This document is for agents who work in magi-code (`~/Dev/magi-code`). It tells 
 the `o200k_base` counter, which code to change, which behaviour must stay the same, and how to report problems.
 The tracking issue is [#7](https://github.com/magimetal/magi-tokenizer/issues/7).
 
-The author read magi-code at commit `6f56b655` ("feat(sessions): persist unique short event IDs") and did not change
-it. Check paths and line numbers again before you edit, because they can move.
+The author first read magi-code at commit `6f56b655` ("feat(sessions): persist unique short event IDs") and later
+checked the routing at `766c6075` (v0.97.6). The author did not change magi-code. Check paths and line numbers again
+before you edit, because they can move.
 
 ## Contents
 
@@ -34,13 +35,13 @@ Out of scope. Do not change these in the pilot:
   model uses.
 - `cl100k_base`. magi-code routes `gpt-4`, `gpt-3.5-turbo` and embedding models to `cl100k_base`. Those routes stay
   on bpe-openai, so bpe-openai stays a dependency.
-- Models that use the chars/4 fallback estimate today. This includes `gpt-6*` and `gpt-6-astra`, which match no
-  prefix. If these models use `o200k_base`, the fix is a separate routing change (see [Open items](#open-items)).
+- Models that use the chars/4 fallback estimate today. Since v0.97.6, `gpt-6-*` and `gpt-6.1-*` route to
+  `o200k_base` in `token_encoding_family_for_model`, so they are in scope through that route.
 - Other providers. Only `OPENAI_CODEX_PROVIDER` gets a tokenizer today.
 
 ## What is known about the tokenizer
 
-These results are from ARM64 macOS with Rust 1.98.1:
+These results are from ARM64 macOS with Rust 1.98.1, except where noted:
 
 - The `verify` suite found zero mismatches against tiktoken-rs. It compares token IDs for `encode_ordinary` and
   `encode_with_special_tokens`, and counts. Inputs: edge cases, all Unicode scalar classes, 200,000 fuzz texts,
@@ -50,21 +51,22 @@ These results are from ARM64 macOS with Rust 1.98.1:
 - Counting is about 3× faster than bpe-openai on source code and session snapshots. This was measured on one
   machine under background load, with about ±10% variation.
 - There is no vocabulary load at first use, because the build creates the tables at compile time.
-- The library builds with Rust 1.88.0 and has no runtime dependencies.
+- The library builds with Rust 1.88.0 and 1.90.0 and has no runtime dependencies.
+- CI runs `verify` (without the private fixture and snapshots) on x86_64 and ARM64 Linux, ARM64 macOS, x86_64 and
+  ARM64 Windows, i686 Linux and big-endian s390x Linux under QEMU: zero mismatches on each.
 
 These items are not established yet. Each one has an issue:
 
 | Gap | Issue |
 | --- | --- |
 | Long untrusted input could reach the whole-piece heap fallback: in measured runs 26–27 bytes of peak memory per piece byte (input included) and 11–20 times slower than windows, not a proven bound. `verify` now forces and checks this path; no verified text reaches it naturally, but no input is known to be unable to reach it. | [#1](https://github.com/magimetal/magi-tokenizer/issues/1) |
-| Verified only on ARM64 macOS. No CI. Not built with Rust 1.90.0. | [#4](https://github.com/magimetal/magi-tokenizer/issues/4) |
 | NOTICE does not contain the Unicode license text. | [#5](https://github.com/magimetal/magi-tokenizer/issues/5) |
 | Long random CJK pieces are slower than with bpe-openai. | [#6](https://github.com/magimetal/magi-tokenizer/issues/6) |
 | Effect on magi-code build time and binary size is not measured. | [#7](https://github.com/magimetal/magi-tokenizer/issues/7) |
 
-Because of #1 and #4:
+Because of #1:
 
-- Do not use the active phase on a platform that has not passed `verify` (#4).
+- Do not use the active phase on a platform that is not in the CI `verify` matrix.
 - Keep the `off` mode until the gaps that affect your platforms are closed.
 
 ## Current magi-code behaviour
@@ -182,7 +184,7 @@ magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev 
   `allow-git = ["https://github.com/magimetal/magi-tokenizer"]`.
 - The license is Apache-2.0, which `deny.toml` already allows. NOTICE includes the OpenAI MIT notice for the
   vocabulary. The Unicode license text is pending (#5).
-- magi-code uses Rust 1.90.0. The library is checked only on 1.88.0 and 1.98.1 (#4). Build it on 1.90.0 first.
+- magi-code uses Rust 1.90.0. The library builds on 1.88.0, 1.90.0 and 1.98.1; CI builds it on 1.88.0 and 1.90.0 (#4).
 - Dependents do not inherit magi-tokenizer's release profile (fat LTO, optimized build script). Measure debug and
   release build times in magi-code. If the build script is slow in debug builds, add
   `[profile.dev.build-override] opt-level = 3` to magi-code or accept the time.
@@ -229,9 +231,6 @@ The repository is public. Do not put prompts, files, tool output, session conten
 
 These are app decisions for magi-code, not for this repository:
 
-- `gpt-6*` and `gpt-6-astra` match no encoding prefix and use the chars/4 estimate. `src/agent/runner/preparation.rs`
-  handles `gpt-6-astra` explicitly. If these models use `o200k_base`, add them to `token_encoding_family_for_model`
-  in a separate change, and update `src/tool_output_measurement.rs` to match.
 - `cl100k_base` routes remain. To remove bpe-openai, first drop or replace those routes.
 - Release panic strategy. A panic during counting can end the process. `catch_unwind` does not cover aborts, OOM or
   hangs. Consider this together with #3 before the active phase.

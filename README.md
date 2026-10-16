@@ -31,9 +31,9 @@ goal, but exactness is required. A faster result with one wrong token ID is a fa
 | --- | --- |
 | Encoding | `o200k_base`: 199,998 ordinary tokens (IDs 0–199,997) plus special tokens |
 | Special tokens | `<\|endoftext\|>` = 199,999, `<\|endofprompt\|>` = 200,018 |
-| Models | Upstream tiktoken maps the GPT-4o, o-series and GPT-5 model prefixes to `o200k_base`. GPT-5.6, GPT-6.0, GPT-6.1 and Astra are target models, but their encodings are **not confirmed yet**. The library exposes the encoding, not a model-name router, so it does not claim support for unconfirmed models. |
+| Models | Upstream tiktoken maps the GPT-4o, o-series and GPT-5 model prefixes to `o200k_base`. magi-code v0.97.6 also routes `gpt-6-*` and `gpt-6.1-*` (including `gpt-6-astra`) to `o200k_base`; its maintainer validated that routing in magi-code. The library exposes the encoding, not a model-name router; model routing stays with the application. |
 | Input | `&str` (valid UTF-8). Decoding can return raw bytes for token sequences that are not valid UTF-8. |
-| Platforms | Any Rust target. Tables are emitted in the target's byte order. Development and measurement were done on ARM64 macOS. |
+| Platforms | Any Rust target. Tables are emitted in the target's byte order. CI runs `verify` on x86_64 and ARM64 Linux, ARM64 macOS, x86_64 and ARM64 Windows, 32-bit i686 Linux and big-endian s390x Linux (QEMU). Speed and memory were measured only on ARM64 macOS. |
 
 ## What is different
 
@@ -407,8 +407,8 @@ tools/gen-unicode/           standalone generator for src/unicode_classes.rs (pi
 
 ## Development
 
-Requirements: the library builds with Rust 1.88.0 (checked); older versions are untested. The benchmark harness
-uses newer standard-library APIs. Development used Rust 1.98.1.
+Requirements: the library builds with Rust 1.88.0 and 1.90.0 (both checked in CI); older versions are untested. The
+benchmark harness uses newer standard-library APIs and runs on stable in CI. Development used Rust 1.98.1.
 
 ```sh
 # Library
@@ -456,7 +456,8 @@ the scanner, tables or merge code.
 - **One encoding.** Only `o200k_base`. Other encodings (`cl100k_base`, `o200k_harmony`) and model-name routing are
   not implemented.
 - **Testing gaps.** The `usize` index path is checked on small pieces through a harness hook, not on a real piece
-  of 4 GiB or more. Measurements only on ARM64 macOS.
+  of 4 GiB or more. Speed and memory measured only on ARM64 macOS. CI runs without `MAGI_TOKENIZER_ASSETS`, so the
+  shared fixture and session snapshots are checked only locally.
 
 ## Provenance and licensing
 

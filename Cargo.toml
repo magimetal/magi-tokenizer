@@ -2,8 +2,10 @@
 name = "magi-tokenizer"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "Exact, fast o200k_base BPE tokenizer with build-time tables and a hand-written pretokenizer"
+repository = "https://github.com/magimetal/magi-tokenizer"
 include = ["/src", "/build.rs", "/assets", "/LICENSE", "/NOTICE", "/README.md"]
 
 [lib]

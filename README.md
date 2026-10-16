@@ -7,7 +7,9 @@ For every input, magi-tokenizer produces the same token IDs as
 goal, but exactness is required. A faster result with one wrong token ID is a failure.
 
 > **Status: experimental, version 0.1.0.** The library passes the full differential verification suite described
-> below. It is not published. Open items are listed under [Known limitations](#known-limitations).
+> below. It is not published. Open items are listed under [Known limitations](#known-limitations) and as
+> [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues). The magi-code pilot plan is in
+> [docs/magi-code-pilot.md](docs/magi-code-pilot.md).
 
 ## Contents
 
@@ -84,10 +86,11 @@ The ideas below were designed for this project. They rest on one published fact,
   this passes.
 - **Faster on ordinary text:** about 6× tiktoken-rs and 3× bpe-openai on source code, transcripts and the shared
   fixture.
-- **No cliff on long pieces.** Long single pieces that make tiktoken-rs slow down sharply, such as long runs of one
-  character or a short pattern, stay fast, and counting them does not need memory for the tokens.
-- **No start-up cost.** Short-lived processes, such as command-line tools and hooks, do not pay 80–170 ms to load
-  a vocabulary.
+- **No cliff on the measured long pieces.** Long single pieces that make tiktoken-rs slow down sharply, such as long
+  runs of one character or a short pattern, stay fast, and counting them does not need memory for the tokens. Input
+  that reaches the whole-piece heap fallback (see [Known limitations](#known-limitations)) is not covered by this.
+- **No vocabulary load.** Short-lived processes, such as command-line tools and hooks, do not pay 80–170 ms to load
+  a vocabulary. The first call still pays for cold caches and page faults.
 
 ### Where it is not better
 
@@ -97,11 +100,11 @@ The ideas below were designed for this project. They rest on one published fact,
 
 ## Quick start
 
-The crate is not on crates.io. Use a path or git dependency:
+The crate is not on crates.io. Use a git dependency pinned to a commit, or a path dependency:
 
 ```toml
 [dependencies]
-magi-tokenizer = { path = "../magi-tokenizer" }
+magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev = "<commit>" }
 ```
 
 ```rust
@@ -244,8 +247,9 @@ window is merged from scratch. That merge cost is what remains in the slow cases
 **Bounded memory.** A window never starts more than 640 bytes (the largest overlap plus one token) before the
 end of the text encoded so far, so tokens ending further back are final. Every 4,096 pending tokens, the final
 ones are handed out: appended to the output by `encode_ordinary`, only counted by `count_ordinary`. Working memory
-for a long piece is therefore bounded regardless of its length: at most about 0.6 MiB (16 cached windows of up to
-4,096 bytes plus pending tokens), and usually a few KiB. The one exception is the whole-piece heap fallback, which
+for a long piece is therefore bounded regardless of its length: the 16 cached windows hold at most 64 KiB of bytes,
+and the window merge state and pending tokens are a few hundred KiB at most (estimated from the data structures,
+not measured including allocator overhead), usually a few KiB. The one exception is the whole-piece heap fallback, which
 needs memory proportional to the piece; when it runs, `encode_ordinary` removes the tokens it already appended
 for that piece.
 
@@ -375,6 +379,10 @@ cargo run --release -p magi-tokenizer-bench -- bench long
 # First-call time in a fresh process
 cargo run --release -p magi-tokenizer-bench -- startup magi        # or tiktoken, bpe-openai
 
+# Check whole files (issue reproductions): fails if magi-tokenizer differs from tiktoken-rs in pieces, IDs,
+# counts, decode or special handling, or if bpe-openai's count differs from tiktoken-rs
+cargo run --release -p magi-tokenizer-bench -- check path/to/repro.txt
+
 # Regenerate the Unicode class table (only when the pinned regex versions change)
 cd tools/gen-unicode && cargo run --release
 ```
@@ -397,9 +405,11 @@ the scanner, tables or merge code.
 - **Slow case.** Long random pieces of CJK text from a small set of characters (see above).
 - **Heap fallback memory.** If a stretch of a long piece has no stitch point within 4,096 bytes, the whole piece
   is merged with the heap, which needs memory proportional to its length. How often real text reaches this path
-  has not been measured.
+  has not been measured, and no test forces it yet.
 - **One encoding.** Only `o200k_base`. Other encodings (`cl100k_base`, `o200k_harmony`) and model-name routing are
   not implemented.
+- **Testing gaps.** No direct differential test of the heap merge on arbitrary byte strings, no panic audit, no
+  tests of pieces of 4 GiB or more (the `usize` index path), and measurements only on ARM64 macOS.
 
 ## Provenance and licensing
 

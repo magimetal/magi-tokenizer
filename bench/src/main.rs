@@ -1,6 +1,7 @@
 // Differential verification and benchmarks for magi-tokenizer against tiktoken-rs (reference) and bpe-openai.
 //
 //   cargo run --release -p magi-tokenizer-bench -- verify   # exact pieces/ids/counts/decode vs references
+//   cargo run --release -p magi-tokenizer-bench -- check <file>...  # the same checks on whole files (issue repros)
 //   cargo run --release -p magi-tokenizer-bench -- bench    # throughput, all three tokenizers
 //   cargo run --release -p magi-tokenizer-bench -- startup <magi|tiktoken|bpe-openai>  # one first-call timing
 //
@@ -36,10 +37,43 @@ fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("verify") => verify(),
+        Some("check") if args.len() > 1 => check_files(&args[1..]),
         Some("bench") => bench(args.get(1).map(String::as_str)),
         Some("startup") => startup(args.get(1).map(String::as_str).unwrap_or("magi")),
-        _ => Err("usage: magi-tokenizer-bench verify | bench [filter] | startup <magi|tiktoken|bpe-openai>".into()),
+        _ => Err(
+            "usage: magi-tokenizer-bench verify | check <file>... | bench [filter] | startup <magi|tiktoken|bpe-openai>"
+                .into(),
+        ),
     }
+}
+
+/// Runs the exact checks on each file as one text and reports magi-tokenizer, tiktoken-rs and bpe-openai counts.
+/// Fails a file when magi-tokenizer differs from tiktoken-rs (pieces, ids, counts, decode, specials), or when
+/// bpe-openai's count differs from tiktoken-rs: a pilot shadow disagreement that points at the baseline, not magi.
+fn check_files(paths: &[String]) -> Result<()> {
+    let references = References::new()?;
+    let bpe_openai = bpe_openai::o200k_base();
+    let mut failures = 0;
+    for path in paths {
+        let text = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+        let tiktoken_count = references.tiktoken.encode_ordinary(&text).len();
+        let bpe_openai_count = bpe_openai.count(&text);
+        let counts = format!(
+            "magi {} / tiktoken {tiktoken_count} / bpe-openai {bpe_openai_count}",
+            magi_tokenizer::count_ordinary(&text)
+        );
+        let verdict = match references.check(&text) {
+            Err(error) => format!("MISMATCH vs tiktoken: {error}"),
+            Ok(()) if bpe_openai_count != tiktoken_count => "matches tiktoken; bpe-openai DIFFERS".to_owned(),
+            Ok(()) => {
+                println!("{path}: matches tiktoken and bpe-openai ({} bytes; {counts})", text.len());
+                continue;
+            }
+        };
+        failures += 1;
+        println!("{path}: {verdict} ({} bytes; {counts})", text.len());
+    }
+    if failures > 0 { Err(format!("{failures} of {} files disagree", paths.len()).into()) } else { Ok(()) }
 }
 
 // ---- inputs ---------------------------------------------------------------------------------------------

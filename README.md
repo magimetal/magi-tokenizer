@@ -47,7 +47,7 @@ table compares magi-tokenizer with the two Rust tokenizers it is benchmarked aga
 | Vocabulary setup | Decoded and hashed at run time (166 ms first call) | Built at run time (78 ms first call) | Built by `build.rs` into embedded hash tables; nothing runs at start (0.1 ms first call) |
 | Pretokenizer | `fancy-regex` with lookahead | `regex-automata` with a lookahead workaround | Hand-written scanner (derived from `toks`) with Unicode 16 classes generated from the same `regex` crate version as the reference |
 | Short pieces | Rescans all pair ranks after each merge | Backtracking search over Aho-Corasick automata of the vocabulary | Stack arrays, no allocation; packed rank+position keys with per-block minimums |
-| Long pieces | Same rescan: cost grows with the square of the length (14 MiB/s on long runs) | Same backtracking search | Overlapping windows, stitched and cached (954 MiB/s on long runs) |
+| Long pieces | Same rescan: cost grows with the square of the length (15 MiB/s on long runs) | Same backtracking search | Overlapping windows, stitched and cached (954 MiB/s on long runs) |
 | Counting | Encodes, then takes the length | Separate count function | Separate count function; long pieces counted in bounded memory |
 
 ### What is new here
@@ -66,7 +66,7 @@ The ideas below were designed for this project. They rest on one published fact,
 - **Window cache with full byte comparison.** Repetitive text (`aaaa…`, `ababab…`, repeated punctuation, 300,000
   spaces) produces the same window bytes again and again. A small cache, cleared on every call, reuses earlier
   window encodings. A hit is accepted only after the bytes are compared in full, so a hash collision cannot produce
-  a wrong token. This is why long runs are about 6× faster than bpe-openai and 67× faster than tiktoken-rs.
+  a wrong token. This is why long runs are about 5.6× faster than bpe-openai and 64× faster than tiktoken-rs.
 - **Boundary-aligned windows.** Each window starts where a token of the result so far starts, so its first merges
   repeat ones already done and the join point is usually found within the first few tokens.
 - **Streaming finalization.** A window can only reach a fixed distance back (640 bytes), so every token that ends
@@ -369,21 +369,24 @@ on the same inputs. Before timing, it checks that all three return the same tota
 150 ms each, in a rotated order each round; each figure is the job's median round. tiktoken-rs has no separate
 count, so its encode figure is used for both.
 
-Latest run, count throughput in MiB/s:
+Latest run (commit `629e2e6`, library code as in `49b9a29`; Rust 1.98.1; `toks` source tree and both private assets),
+count throughput in MiB/s:
 
 | Workload | MiB | magi-tokenizer | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `fixture_200k` | 0.895 | 253.8 | 39.3 | 81.8 | 6.46× | 3.10× |
-| `source_1MiB` | 1.000 | 203.1 | 32.6 | 59.5 | 6.24× | 3.41× |
-| `source_48B_chunks` | 0.250 | 176.2 | 27.1 | 53.3 | 6.49× | 3.31× |
-| `source_256B_chunks` | 0.250 | 212.2 | 29.6 | 58.0 | 7.18× | 3.66× |
-| `multilingual` | 0.468 | 130.9 | 43.0 | 96.6 | 3.04× | 1.35× |
-| `long_runs` | 1.678 | 954.1 | 14.1 | 163.7 | 67.46× | 5.83× |
-| `long_unrepeated` | 0.680 | 54.0 | 14.5 | 43.5 | 3.71× | 1.24× |
-| `session_snapshots` | 30.748 | 251.9 | 39.5 | 80.2 | 6.38× | 3.14× |
+| `fixture_200k` | 0.895 | 256.3 | 39.9 | 90.0 | 6.42× | 2.85× |
+| `source_1MiB` | 1.000 | 212.7 | 33.8 | 65.0 | 6.30× | 3.27× |
+| `source_48B_chunks` | 0.250 | 183.1 | 28.5 | 52.9 | 6.43× | 3.46× |
+| `source_256B_chunks` | 0.250 | 207.5 | 31.8 | 63.0 | 6.54× | 3.30× |
+| `multilingual` | 0.468 | 137.2 | 44.2 | 100.0 | 3.10× | 1.37× |
+| `long_runs` | 1.678 | 953.7 | 14.9 | 170.5 | 64.16× | 5.59× |
+| `long_unrepeated` | 0.680 | 57.7 | 14.9 | 45.2 | 3.88× | 1.28× |
+| `session_snapshots` | 30.748 | 256.9 | 40.9 | 86.1 | 6.28× | 2.98× |
 
-Encode throughput follows the same pattern: 3.01–6.56× tiktoken-rs and 1.41–3.95× bpe-openai on the ordinary-text
-workloads.
+Encode throughput follows the same pattern: 3.02–6.49× tiktoken-rs and 1.25–3.63× bpe-openai on every workload
+except `long_runs` (65.15× and 6.04× there). A second run straight after gave magi-tokenizer count figures within
+4% of these; the bpe-openai ratios moved more (for example `fixture_200k` count 2.85× → 3.10×), within the ±10%
+noted under [Caveats](#caveats).
 
 Source workloads use the `toks` source tree; with the default source (this repository) the numbers differ.
 
@@ -436,8 +439,7 @@ cargo run --release -p magi-tokenizer-bench -- startup magi     # or tiktoken, b
 
 - All figures come from one ARM64 Apple M5 Pro with other work running in the background. Rotated job order
   limits drift between tokenizers, but repeated runs still vary by about 10%.
-- The commit and Rust version of the table above were not recorded. Results were measured before the
-  `harness` feature existed; rerun `bench` to refresh them for a given commit.
+- The table above is one run on one commit. Rerun `bench` to refresh it after changing the merge or scanner code.
 - The native `toks` C library has not been benchmarked yet.
 
 ## Repository layout

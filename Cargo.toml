@@ -3,7 +3,8 @@ name = "magi-tokenizer"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-license = "Apache-2.0"
+# Apache-2.0 for the code; MIT for the bundled tiktoken vocabulary; Unicode-3.0 for the generated Unicode classes.
+license = "Apache-2.0 AND MIT AND Unicode-3.0"
 description = "Exact, fast o200k_base BPE tokenizer with build-time tables and a hand-written pretokenizer"
 repository = "https://github.com/magimetal/magi-tokenizer"
 include = ["/src", "/build.rs", "/assets", "/LICENSE", "/NOTICE", "/README.md"]

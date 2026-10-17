@@ -60,7 +60,6 @@ These items are not established yet. Each one has an issue:
 | Gap | Issue |
 | --- | --- |
 | Long untrusted input could reach the whole-piece heap fallback: in measured runs 26–27 bytes of peak memory per piece byte (input included) and 11–20 times slower than windows, not a proven bound. `verify` now forces and checks this path; no verified text reaches it naturally, but no input is known to be unable to reach it. | [#1](https://github.com/magimetal/magi-tokenizer/issues/1) |
-| NOTICE does not contain the Unicode license text. | [#5](https://github.com/magimetal/magi-tokenizer/issues/5) |
 | Long random CJK pieces are slower than with bpe-openai. | [#6](https://github.com/magimetal/magi-tokenizer/issues/6) |
 | Effect on magi-code build time and binary size is not measured. | [#7](https://github.com/magimetal/magi-tokenizer/issues/7) |
 
@@ -182,8 +181,9 @@ magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev 
   library code in it is the code that `verify` checked. Use a later commit only if its `verify` run also passed.
 - `deny.toml` has `unknown-git = "deny"` and `allow-git = []`. Add this repository:
   `allow-git = ["https://github.com/magimetal/magi-tokenizer"]`.
-- The license is Apache-2.0, which `deny.toml` already allows. NOTICE includes the OpenAI MIT notice for the
-  vocabulary. The Unicode license text is pending (#5).
+- The crate's license expression is `Apache-2.0 AND MIT AND Unicode-3.0`; `deny.toml` allows all three.
+  `cargo deny check licenses` with magi-code's `deny.toml` passed on a probe crate that depends on magi-tokenizer.
+  NOTICE includes the OpenAI MIT notice for the vocabulary and the full Unicode License v3 text (#5).
 - magi-code uses Rust 1.90.0. The library builds on 1.88.0, 1.90.0 and 1.98.1; CI builds it on 1.88.0 and 1.90.0 (#4).
 - Dependents do not inherit magi-tokenizer's release profile (fat LTO, optimized build script). Measure debug and
   release build times in magi-code. If the build script is slow in debug builds, add

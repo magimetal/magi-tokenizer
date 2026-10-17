@@ -461,8 +461,10 @@ the scanner, tables or merge code.
 
 ## Provenance and licensing
 
-magi-tokenizer is licensed under the [Apache License 2.0](LICENSE). [NOTICE](NOTICE) carries the attributions below,
-including the full MIT notice for the tiktoken vocabulary.
+magi-tokenizer's code is licensed under the [Apache License 2.0](LICENSE). The crate's license expression is
+`Apache-2.0 AND MIT AND Unicode-3.0`, because it bundles the MIT-licensed tiktoken vocabulary and tables derived
+from the Unicode Character Database. [NOTICE](NOTICE) carries the attributions below, including the full MIT
+notice for the vocabulary and the full Unicode License v3 text.
 
 | Component | Source | Licence |
 | --- | --- | --- |

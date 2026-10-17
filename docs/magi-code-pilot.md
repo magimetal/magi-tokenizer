@@ -174,11 +174,11 @@ Follow magi-code's conventions. At minimum:
 
 ```toml
 # magi-code Cargo.toml
-magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev = "c60b63e01f9f88571657126f9854298645badee6" }
+magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev = "49b9a29599b2859efb3e76fe0cab5cb13505b742" }
 ```
 
-- Pin a full commit hash, not a branch. Commit `Cargo.lock`. The hash above is the first pushed commit; the
-  library code in it is the code that `verify` checked. Use a later commit only if its `verify` run also passed.
+- Pin a full commit hash, not a branch. Commit `Cargo.lock`. The hash above is the latest commit whose library code
+  passed CI on every platform (#1–#5 work included). Use a later commit only if its CI run also passed.
 - `deny.toml` has `unknown-git = "deny"` and `allow-git = []`. Add this repository:
   `allow-git = ["https://github.com/magimetal/magi-tokenizer"]`.
 - The crate's license expression is `Apache-2.0 AND MIT AND Unicode-3.0`; `deny.toml` allows all three.
@@ -188,9 +188,9 @@ magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev 
 - Dependents do not inherit magi-tokenizer's release profile (fat LTO, optimized build script). Measure debug and
   release build times in magi-code. If the build script is slow in debug builds, add
   `[profile.dev.build-override] opt-level = 3` to magi-code or accept the time.
-- The crate embeds about 3.6 MiB of vocabulary and tables. A standalone release probe with magi-tokenizer was smaller
-  than the same probe with bpe-openai. magi-code keeps bpe-openai for `cl100k_base`, so its binary will grow. Measure
-  the growth.
+- The build script turns the 3.6 MB vocabulary into about 19 MiB of tables embedded in the binary. A release probe
+  that counts one string was 19.9 MB with magi-tokenizer and 35.1 MB with bpe-openai (empty program: 0.5 MB, ARM64
+  macOS). magi-code keeps bpe-openai for `cl100k_base`, so its binary will grow. Measure the growth.
 
 ## Disagreements and issue reports
 

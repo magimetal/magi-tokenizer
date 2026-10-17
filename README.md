@@ -16,6 +16,7 @@ goal, but exactness is required. A faster result with one wrong token ID is a fa
 - [Scope](#scope)
 - [What is different](#what-is-different)
 - [Quick start](#quick-start)
+- [Using it in your project](#using-it-in-your-project)
 - [API](#api)
 - [How it works](#how-it-works)
 - [Verification](#verification)
@@ -100,11 +101,12 @@ The ideas below were designed for this project. They rest on one published fact,
 
 ## Quick start
 
-The crate is not on crates.io. Use a git dependency pinned to a commit, or a path dependency:
+The crate is not on crates.io. Use a git dependency pinned to a full commit hash, or a path dependency. The latest
+commit whose library code passed CI on every platform is `49b9a29`:
 
 ```toml
 [dependencies]
-magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev = "<commit>" }
+magi-tokenizer = { git = "https://github.com/magimetal/magi-tokenizer.git", rev = "49b9a29599b2859efb3e76fe0cab5cb13505b742" }
 ```
 
 ```rust
@@ -123,6 +125,31 @@ assert_eq!(magi_tokenizer::decode(&ids).as_deref(), Some(text));
 
 There is no setup step: all tables are built at compile time and embedded in the binary (see [Startup](#startup)).
 The first call still pays for cold caches and for paging in the parts of the tables it touches.
+
+## Using it in your project
+
+- **Pinning and stability.** The crate is experimental: there is no changelog and no compatibility promise, and
+  the API can change between commits. Pin a full commit hash and commit `Cargo.lock`. Move the pin only to a
+  commit whose CI run passed. The `harness` feature is a test hook for `bench/`, not part of the API; do not
+  enable it.
+- **Coming from tiktoken.** `encode_ordinary` matches tiktoken's `encode_ordinary`, and
+  `encode_with_special_tokens` matches `encode(text, allowed_special="all")`. There is no equivalent of tiktoken's
+  default `encode()`, which raises an error when the text contains special-token text, and no way to allow some
+  special tokens but not others. To get either behaviour, check the text for the strings in `SPECIAL_TOKENS`
+  yourself before encoding.
+- **Counting.** If you only need a count, call `count_ordinary` or `count_with_special_tokens`. They return the same
+  numbers as the encode functions without building the token list.
+- **Untrusted input.** Encoding allocates 4 bytes per output token. A long piece that reaches the whole-piece heap
+  fallback needs memory in proportion to its length: 26–27 bytes per piece byte in the measured runs, not a proven
+  bound (see [Known limitations](#known-limitations)). No tested text reaches it on its own, but none is known to
+  be unable to. If input size is not under your control, cap the input length before calling the library; the
+  library has no memory limit setting.
+- **Binary size and build time.** The build script turns the vocabulary into about 19 MiB of tables that are
+  embedded in your binary: a release program that counts one string was 19.9 MB, against 0.5 MB for an empty
+  program and 35.1 MB for the same program with bpe-openai (ARM64 macOS). The tables are generated at compile
+  time with your build profile, because dependents do not inherit this repository's `[profile]` settings. A clean
+  build of that program took about 1.3 s in debug and in release on an Apple M5 Pro. If the build script is slow
+  on your machine in debug builds, add `[profile.dev.build-override] opt-level = 3`.
 
 ## API
 
@@ -379,15 +406,38 @@ magi-tokenizer needs no runtime initialisation. On a contended machine, the firs
 0.107 ms, against 166 ms for tiktoken-rs and 78 ms for bpe-openai (vocabulary loading). Process launch time is not
 included, and the first call is still slower than later ones (cold caches, table pages faulted in on first use).
 
-Peak memory, one random `a`/`b` piece (`/usr/bin/time -l`, separate probe program): counting 16, 64 and 128 MiB
-pieces peaked at 29, 77 and 141 MiB of RSS, so it adds a constant 13 MiB on top of the text (embedded tables
-paged in plus working buffers). Encoding the 64 MiB piece peaked at 164 MiB, because its 22.9 million IDs take
-87 MiB. Memory for whole-text workloads and for other tokenizers has not been measured.
+Peak memory, one random `a`/`b` piece (`/usr/bin/time -l`): counting 16, 64 and 128 MiB pieces peaked at 29, 77
+and 141 MiB of RSS, so it adds a constant 13 MiB on top of the text (embedded tables paged in plus working
+buffers). Encoding the 64 MiB piece peaked at 164 MiB, because its 22.9 million IDs take 87 MiB. The 16 and
+64 MiB figures were reproduced with `magi-tokenizer-bench memory` (see [Bounded memory](#how-it-works)); the
+128 MiB figure came from an earlier probe program that is not in the repository. Memory for whole-text workloads
+and for other tokenizers has not been measured.
+
+### Reproducing
+
+```sh
+MAGI_TOKENIZER_SOURCE=/path/to/toks MAGI_TOKENIZER_ASSETS=/path/to/assets \
+  cargo run --release -p magi-tokenizer-bench -- bench          # optional filter, e.g. `bench long`
+cargo run --release -p magi-tokenizer-bench -- startup magi     # or tiktoken, bpe-openai; one fresh process each
+/usr/bin/time -l target/release/magi-tokenizer-bench memory 64 count window   # Linux: /usr/bin/time -v
+```
+
+- `fixture_200k` and `session_snapshots` need `MAGI_TOKENIZER_ASSETS` (see [Development](#development)). The
+  session snapshots are private transcripts and are not published, so that row cannot be reproduced by others.
+  Without the variable those workloads are skipped.
+- Source workloads read the first 1 MiB (`source_1MiB`) or 256 KiB (chunked workloads) of the source text, so
+  results depend on the tree passed in `MAGI_TOKENIZER_SOURCE`.
+- The random CJK row and the comparison figures under it came from a separate probe program that is not in the
+  repository.
+- The bench enables the `harness` feature. On a quick check (source text, long runs, random `a`/`b`) count
+  throughput was the same with and without it, within run-to-run variation.
 
 ### Caveats
 
 - All figures come from one ARM64 Apple M5 Pro with other work running in the background. Rotated job order
   limits drift between tokenizers, but repeated runs still vary by about 10%.
+- The commit and Rust version of the table above were not recorded. Results were measured before the
+  `harness` feature existed; rerun `bench` to refresh them for a given commit.
 - The native `toks` C library has not been benchmarked yet.
 
 ## Repository layout

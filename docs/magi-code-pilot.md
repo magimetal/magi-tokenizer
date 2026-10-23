@@ -60,7 +60,6 @@ These items are not established yet. Each one has an issue:
 | Gap | Issue |
 | --- | --- |
 | Long untrusted input could reach the whole-piece heap fallback: in measured runs 26–27 bytes of peak memory per piece byte (input included) and 11–20 times slower than windows, not a proven bound. `verify` now forces and checks this path; no verified text reaches it naturally, but no input is known to be unable to reach it. | [#1](https://github.com/magimetal/magi-tokenizer/issues/1) |
-| Long random CJK pieces are slower than with bpe-openai. | [#6](https://github.com/magimetal/magi-tokenizer/issues/6) |
 | Effect on magi-code build time and binary size is not measured. | [#7](https://github.com/magimetal/magi-tokenizer/issues/7) |
 
 Because of #1:

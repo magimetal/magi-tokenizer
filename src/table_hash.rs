@@ -34,3 +34,15 @@ pub const fn pair_key(left: u32, right: u32) -> u64 {
 pub const fn pair_slot_for(key: u64) -> usize {
     (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - PAIR_TABLE_BITS)) as usize
 }
+
+/// Byte context in which a character may start merging as one part (see `build.rs`): the byte before it is a
+/// continuation byte and the byte after it starts a multibyte sequence, or the slice ends there.
+#[inline(always)]
+pub const fn is_continuation_byte(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
+#[inline(always)]
+pub const fn starts_multibyte_sequence(byte: u8) -> bool {
+    byte >= 0xC0
+}

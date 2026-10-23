@@ -4,7 +4,7 @@ A fast Rust tokenizer for OpenAI's `o200k_base` encoding. It produces the same t
 [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary` and `encode_with_special_tokens`.
 Speed improvements must pass the full verification suite.
 
-Experimental, version 0.0.1. The full [verification suite](#verification) passes. See
+Experimental, version 0.0.2. The full [verification suite](#verification) passes. See
 [Known limitations](#known-limitations), [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues)
 and the [magi-code pilot plan](docs/magi-code-pilot.md).
 
@@ -14,7 +14,7 @@ Add the crate from [crates.io](https://crates.io/crates/magi-tokenizer):
 
 ```toml
 [dependencies]
-magi-tokenizer = "=0.0.1"
+magi-tokenizer = "=0.0.2"
 ```
 
 ```rust
@@ -109,7 +109,7 @@ On source code, transcripts and the shared fixture, magi-tokenizer is about 6× 
 faster than bpe-openai. Cached windows make long runs about 64× and 5.6× faster, respectively. Counting avoids
 storing output tokens. These results exclude the whole-piece heap fallback.
 
-It supports fewer encodings than either competitor and loses to bpe-openai on some random CJK pieces.
+It supports fewer encodings than either competitor.
 All measurements come from one machine under background load (see [Caveats](#caveats)).
 
 ## How it works
@@ -130,6 +130,8 @@ All measurements come from one machine under background load (see [Caveats](#cav
   It covers all 446,189 splits of vocabulary tokens into two vocabulary tokens. IDs fit in 18 bits.
 - A dense 65,536-entry array holds byte-pair ranks for the most common lookup: the first merge.
 - A byte-token table holds the 256 single-byte tokens (IDs 0 to 255).
+- A 65,536-entry array, one per 2- and 3-byte character, holds the character's token when merging may start from
+  it whole instead of from its bytes (see [Byte-pair merging](#byte-pair-merging-srcbpers)), else 0.
 
 Token and pair counts are checked at build time, so a changed vocabulary fails the build rather than producing
 wrong tables. The build script and library share hash functions from `src/table_hash.rs`.
@@ -162,6 +164,13 @@ Most pieces are vocabulary tokens: one hash-table probe returns their ID without
   minimum. A merge changes at most three keys, requiring at most three block rescans and four block-minimum checks.
   The longest `o200k_base` token is also 128 bytes.
 - Over 128 bytes: overlapping windows, described below.
+
+Merging starts from single bytes, except for some 2- and 3-byte characters, which start as one part. `build.rs`
+marks a character eligible only if its bytes alone merge into its token, and every token that joins part or all of
+it to a neighbour ranks above each of those inner merges. Its bytes then always merge first, so the result is
+identical with fewer merges. At runtime the byte before must be a continuation byte and the byte after must start a
+multibyte character (or the piece ends there), the only neighbours the build check covers. ASCII-only pieces skip
+the check. Random CJK and Hangul pieces need about a third of the parts.
 
 #### Long pieces: overlapping windows
 
@@ -271,17 +280,24 @@ Encode was 3.02 to 6.49× faster than tiktoken-rs and 1.25 to 3.63× faster than
 `fixture_200k` count went from 2.85× to 3.10×, within the roughly 10% variation noted under [Caveats](#caveats).
 Source results differ when using this repository instead of `toks`.
 
-### Where magi-tokenizer is still slower
+### Random CJK
 
-Random CJK pieces require fresh merges for every window, with three initial byte-parts per character.
-A separate probe, with counts checked against bpe-openai, measured milliseconds per call:
+Random CJK pieces never repeat a window, so every window is merged fresh. Starting eligible characters whole
+(see [Byte-pair merging](#byte-pair-merging-srcbpers)) roughly halved their cost. A separate probe, with token IDs
+checked against bpe-openai, measured milliseconds per call before and after that change:
 
-| Input | magi-tokenizer | bpe-openai |
-| --- | ---: | ---: |
-| 240 KB random CJK from 8 characters | 4.4 | 2.5 |
+| Input | magi-tokenizer before | magi-tokenizer after | bpe-openai |
+| --- | ---: | ---: | ---: |
+| 240 KB random CJK from 8 characters | 4.2 | 2.1 | 2.4 |
+| 240 KB random CJK from 400 characters | 3.8 | 3.2 | 4.3 |
+| 240 KB random Hangul from 8 characters | 4.4 | 1.3 | 2.4 |
+| 240 KB random CJK from `你世一人中大国我` (mostly not eligible) | 4.5 | 2.7 | 2.6 |
+| 2,000 random 8-character CJK pieces, 129 to 1,024 bytes | 19.8 | 10.7 | 11.3 |
 
-In the same probe, 200 KB of random `a`/`b` took 3.3 ms versus 4.2 ms. For 2,000 random `a`/`b` pieces of
-129 to 1,024 bytes, it took 19.5 ms versus 23.6 ms. Random lowercase, letters and punctuation took about half bpe-openai's time.
+In the same probe, 200 KB of random `a`/`b` took 3.1 ms versus 4.1 ms, and random punctuation about half
+bpe-openai's time, unchanged by that change. `bench` without `toks` or the private assets measured `multilingual`
+count at 137 → 178 MiB/s and `long_unrepeated` at 58 → 69 MiB/s; source and `long_runs` stayed within run-to-run
+variation. The table above predates the change.
 
 ### Startup
 
@@ -305,7 +321,7 @@ cargo run --release -p magi-tokenizer-bench -- startup magi     # or tiktoken, b
 - `fixture_200k` and `session_snapshots` require `MAGI_TOKENIZER_ASSETS` (see [Development](#development)). Without
   it, they are skipped. Session transcripts are private and unpublished, so others cannot reproduce that row.
 - Source workloads read the first 1 MiB (`source_1MiB`) or 256 KiB (chunked workloads) from `MAGI_TOKENIZER_SOURCE`.
-- The random CJK and comparison probes are not in this repository.
+- The random CJK probe is not in this repository.
 - The bench enables `harness`. A quick check on source text, long runs and random `a`/`b` found count throughput
   unchanged within run-to-run variation when that feature was disabled.
 
@@ -369,7 +385,8 @@ Correctness uses differential `verify`, not unit tests. Run it after scanner, ta
 
 ## Known limitations
 
-- Long random CJK pieces from small alphabets can be slower than bpe-openai.
+- Random CJK pieces made mostly of characters not eligible to start whole (for example `你`, `世`) still merge
+  from bytes: about level with bpe-openai, not faster.
 - If no stitch point exists within 4,096 bytes, whole-piece fallback can use much more time and memory
   (see [measured fallback costs](#how-it-works)). No verification input, including either optional fixture,
   reaches it naturally, but no input is known to rule it out. Measured costs are not proven bounds.

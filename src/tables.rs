@@ -87,3 +87,29 @@ pub(crate) fn merge_rank(left: u32, right: u32) -> u32 {
 pub(crate) fn byte_merge_rank(left: u8, right: u8) -> u32 {
     BYTE_PAIR_RANKS[(left as usize) << 8 | right as usize]
 }
+
+/// Token of the 2- or 3-byte character starting at `piece[at]`, and its length, if merging may start with the
+/// character as one part instead of separate bytes without changing the result (see `build.rs`).
+#[inline(always)]
+pub(crate) fn premerged_char(piece: &[u8], at: usize) -> Option<(u32, usize)> {
+    let (len, lead_bits) = match piece[at] {
+        lead @ 0xC2..=0xDF => (2, lead & 0x1F),
+        lead @ 0xE0..=0xEF => (3, lead & 0x0F),
+        _ => return None,
+    };
+    let continuation = piece.get(at + 1..at + len)?;
+    if !continuation.iter().all(|&byte| is_continuation_byte(byte))
+        || (at > 0 && !is_continuation_byte(piece[at - 1]))
+        || piece.get(at + len).is_some_and(|&byte| !starts_multibyte_sequence(byte))
+    {
+        return None;
+    }
+    let code_point =
+        continuation.iter().fold(lead_bits as usize, |code_point, &byte| code_point << 6 | (byte & 0x3F) as usize);
+    // Overlong 3-byte forms are not that code point's bytes. Surrogates have no character, so their entries are 0.
+    if len == 3 && code_point < 0x800 {
+        return None;
+    }
+    let id = PREMERGED_CHAR_TOKENS[code_point];
+    (id != 0).then_some((id, len))
+}

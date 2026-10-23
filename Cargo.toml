@@ -1,6 +1,6 @@
 [package]
 name = "magi-tokenizer"
-version = "0.1.0"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.88"
 # Apache-2.0 for the code; MIT for the bundled tiktoken vocabulary; Unicode-3.0 for the generated Unicode classes.

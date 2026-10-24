@@ -51,7 +51,7 @@ assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
 | Encodings | `o200k_base` (always built; module `o200k_base`, also re-exported at the crate root): 199,998 ordinary tokens (IDs 0–199,997). `cl100k_base` (feature `cl100k_base`; module `cl100k_base`): 100,256 ordinary tokens (IDs 0–100,255). Each module has the same functions and constants. |
 | Other encodings | `o200k_harmony`: ordinary text only. tiktoken-rs 0.12.0 builds it from the same vocabulary and split pattern as `o200k_base`, so `o200k_base::encode_ordinary` and `count_ordinary` give the same IDs and counts. Its special tokens differ (for example, 200018 is `<\|reserved_200018\|>`, not `<\|endofprompt\|>`), so do not use the special-token APIs for it ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)). The legacy `r50k_base`, `p50k_base` and `p50k_edit` encodings are not implemented ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)). |
 | Special tokens | `o200k_base`: `<\|endoftext\|>` = 199,999, `<\|endofprompt\|>` = 200,018. `cl100k_base`: `<\|endoftext\|>` = 100,257, `<\|fim_prefix\|>` = 100,258, `<\|fim_middle\|>` = 100,259, `<\|fim_suffix\|>` = 100,260, `<\|endofprompt\|>` = 100,276 |
-| Models | Upstream tiktoken maps the GPT-4o, o-series and GPT-5 model prefixes to `o200k_base`, and GPT-4, GPT-3.5 Turbo and `text-embedding-ada-002`/`-3` to `cl100k_base`. magi-code v0.97.6 also routes `gpt-6-*` and `gpt-6.1-*` (including `gpt-6-astra`) to `o200k_base`; its maintainer validated that routing in magi-code. The library exposes encodings, not a model-name router; model routing stays with the application. |
+| Models | Upstream tiktoken (`tiktoken/model.py`) maps GPT-4o, GPT-4.1, GPT-4.5, GPT-5 and o-series names to `o200k_base`; GPT-4, GPT-3.5 Turbo, `davinci-002`, `babbage-002` and `text-embedding-ada-002`/`-3` to `cl100k_base`; and `gpt-oss-*` to `o200k_harmony`. magi-code v0.97.6 also routes `gpt-6-*` and `gpt-6.1-*` (including `gpt-6-astra`) to `o200k_base`; its maintainer validated that routing in magi-code. The library exposes encodings, not a model-name router: model routing stays with the application by decision (see [Model routing](#model-routing)). |
 | Input | `&str` (valid UTF-8). Decoding can return raw bytes for token sequences that are not valid UTF-8. |
 | Platforms | Any Rust target. Tables are emitted in the target's byte order. CI builds on x86_64 and ARM64 Linux, ARM64 macOS, x86_64 and ARM64 Windows, 32-bit i686 Linux and big-endian s390x Linux. Speed and memory were measured only on ARM64 macOS. |
 
@@ -76,6 +76,24 @@ assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
   binary grew from 20.1 MB (`o200k_base` only) to 30.2 MB (+10.1 MB); enabling the feature without calling it left the
   size unchanged, since unused tables are dropped at link time. Clean release builds of that program took 3.6 s
   without the feature and 4.5 s with it (median of three, Apple M5 Pro).
+
+### Model routing
+
+Decision ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)): this library does not map model names to
+encodings and does not plan to. Keep the mapping in your application, and pick the encoding module from it:
+
+- New models ship more often than this crate. A built-in mapping would lag, and pinning an exact version (as
+  recommended above) would freeze it.
+- There is no single source of truth. Upstream tiktoken does not list `gpt-6-*`, which magi-code routes to
+  `o200k_base`. The application that knows which models it calls is the right owner.
+- Results would be incomplete: `cl100k_base` can be compiled out, `gpt-oss-*` uses `o200k_harmony`, whose
+  special tokens are not implemented ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)), and the
+  legacy 50k encodings are missing ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)).
+- A mapping would be API surface whose behavior changes with every update, before any compatibility policy exists
+  ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)).
+
+A wrong encoding gives wrong counts without any error. Treat unknown model names as an error, or choose a default
+deliberately; do not fall back silently. The [Scope](#scope) table lists the upstream mappings to start from.
 
 ## API
 
@@ -392,7 +410,7 @@ The release profile uses fat LTO and one codegen unit. Build scripts use `opt-le
   (see [measured fallback costs](#how-it-works)). No input is known to rule it out. Measured costs are not proven bounds.
 - `o200k_harmony` special tokens ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)) and the legacy
   `r50k_base`, `p50k_base` and `p50k_edit` encodings ([#19](https://github.com/magimetal/magi-tokenizer/issues/19))
-  are not implemented, and there is no model-name routing ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)).
+  are not implemented. Model-name routing is left to applications by design ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)).
 - The `usize` index path has not been exercised on a real piece of 4 GiB or more.
 - Speed and memory were measured only on ARM64 macOS. CI does not run correctness comparisons; run `bench` locally.
 

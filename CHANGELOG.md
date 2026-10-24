@@ -15,6 +15,9 @@ There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-t
   two-byte pieces skip the vocabulary hash table, merges of pieces under 32 bytes shift parts with a loop instead
   of memmove, and encoding loops scan byte slices. Interleaved runs against `824a427` on one ARM64 macOS machine
   measured +0.5% to +3.2% throughput; token IDs are unchanged.
+- README records the decision that model-name routing stays with applications
+  ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)), with reasons and guidance for unknown model names.
+  The Scope table now lists the full upstream tiktoken mapping, including `gpt-oss-*` → `o200k_harmony`.
 
 ### Added
 

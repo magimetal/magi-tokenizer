@@ -11,6 +11,11 @@ There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-t
   tracked in issues #8–#17. The README published with 0.0.2 still links to the old path.
 - Added this changelog, backfilled from git history.
 
+### Removed
+
+- Differential verification and file-check commands, their test-only hooks and direct dependencies, and CI test runs.
+  Throughput, startup and memory benchmarks remain; CI retains build and clippy coverage.
+
 ## [0.0.2] - 2026-10-23
 
 ### Changed

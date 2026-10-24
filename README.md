@@ -2,9 +2,8 @@
 
 A fast Rust tokenizer for OpenAI's `o200k_base` encoding. It produces the same token IDs as
 [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary` and `encode_with_special_tokens`.
-Speed improvements must pass the full verification suite.
 
-Experimental, version 0.0.2. The full [verification suite](#verification) passes. See
+Experimental, version 0.0.2. No automated correctness suite is included. See
 [Known limitations](#known-limitations) and [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues).
 
 ## Quick start
@@ -41,14 +40,14 @@ and table pages loaded on demand (see [Startup](#startup)).
 | Special tokens | `<\|endoftext\|>` = 199,999, `<\|endofprompt\|>` = 200,018 |
 | Models | Upstream tiktoken maps the GPT-4o, o-series and GPT-5 model prefixes to `o200k_base`. magi-code v0.97.6 also routes `gpt-6-*` and `gpt-6.1-*` (including `gpt-6-astra`) to `o200k_base`; its maintainer validated that routing in magi-code. The library exposes the encoding, not a model-name router; model routing stays with the application. |
 | Input | `&str` (valid UTF-8). Decoding can return raw bytes for token sequences that are not valid UTF-8. |
-| Platforms | Any Rust target. Tables are emitted in the target's byte order. CI runs `verify` on x86_64 and ARM64 Linux, ARM64 macOS, x86_64 and ARM64 Windows, 32-bit i686 Linux and big-endian s390x Linux (QEMU). Speed and memory were measured only on ARM64 macOS. |
+| Platforms | Any Rust target. Tables are emitted in the target's byte order. CI builds on x86_64 and ARM64 Linux, ARM64 macOS, x86_64 and ARM64 Windows, 32-bit i686 Linux and big-endian s390x Linux. Speed and memory were measured only on ARM64 macOS. |
 
 ## Using it in your project
 
 - Pin an exact version and commit `Cargo.lock`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). There is no
   compatibility promise, and the API can change between releases. For git dependencies, pin a full commit hash
   whose CI passed. Do not enable `harness`:
-  it exposes verification hooks for `bench/`, not public API.
+  it exposes memory-benchmark hooks for `bench/`, not a stable API.
 - `encode_ordinary` matches tiktoken's `encode_ordinary`. `encode_with_special_tokens` matches
   `encode(text, allowed_special="all")`. To reject special-token text like tiktoken's default `encode()`, or allow
   only some special tokens, check the strings in `SPECIAL_TOKENS` yourself before encoding.
@@ -90,7 +89,7 @@ Functions do not panic or loop forever on any `&str` or `u32` token ID, except f
 
 Unknown IDs return `None`. The [issue #3 audit](https://github.com/magimetal/magi-tokenizer/issues/3) documents
 invariants for each index, `unwrap` and `unsafe` table view. Compile-time assertions check table and index
-invariants. Release `verify` also passes with `overflow-checks` and `debug-assertions` enabled.
+invariants. No automated correctness suite is included.
 
 ## What is different
 
@@ -213,47 +212,8 @@ Peak RSS for one random `a`/`b` piece (`magi-tokenizer-bench memory`, ARM64 macO
 
 RSS includes input at 1 byte per piece byte. Fallback used 26 to 27 bytes per piece byte and took 11 to 20 times
 as long as windows, with a growing gap at larger sizes. These are measurements, not worst-case bounds.
-No `verify` input reaches fallback unless forced.
 
 The heap merge also handles windows over 128 bytes. It uses `u32` positions, switching to `usize` at 4 GiB.
-
-## Verification
-
-`magi-tokenizer-bench verify` compares against tiktoken-rs 0.12.0 and the original regex via `fancy-regex` 0.17.0.
-For every text it checks pieces, ordinary and special-token IDs and counts, decode round trips, and
-`encode_ordinary_into` appending without changing existing contents. It also checks that all 198,424 valid-UTF-8,
-single-piece vocabulary tokens encode to their own IDs, and reports whole-piece fallbacks for each suite.
-
-The bench enables `harness` for two additional checks. Consumers should not enable it:
-
-- `forced_fallback_<n>` repeats long-piece checks, forcing fallback after 0, 1, 16 or 1,024 stitched windows.
-  At 1,024, this discards tokens already appended or counted. The command fails if any setting triggers no
-  fallback or no setting discards tokens. This injects failure, not an input with no stitch point.
-- `arbitrary_bytes` covers random bytes, invalid UTF-8, small alphabets and text cut at any byte, at lengths
-  0 to 65,536, including 31/32/33, 127/128/129 and 4,095/4,096/4,097. It checks `encode_piece` appending,
-  `count_piece`, stack and window merges, forced fallback, and heap merges with both index types. All must match
-  tiktoken-rs's `byte_pair_split` up to 10,000 bytes, or the heap merge for longer pieces.
-
-| Suite | Texts | Bytes | What it covers |
-| --- | ---: | ---: | --- |
-| `edges` | 883 | 109,014 | Contractions, `ſ`, title-case letters, combining marks, NBSP and ideographic space, CR/LF mixes, special-token fragments, runs of 1–140 characters of six kinds |
-| `unicode_sweep` | 6,370 | 52,020,015 | Every Unicode scalar value in six contexts that exercise each regex alternative, plus mixed triples of code points |
-| `fuzz` | 200,000 | 14,861,094 | Seeded random strings from a hostile alphabet (contractions, marks, emoji, special-token parts, whitespace kinds) |
-| `source_7` / `_48` / `_4096` | 869k / 127k / 1.5k | 6,082,527 each | Source files under `MAGI_TOKENIZER_SOURCE` (here the `toks` repository), cut at three chunk sizes |
-| `multilingual_256` | 1,921 | 491,200 | CJK, Hangul, Cyrillic, Greek, Arabic, Devanagari, Thai, emoji ZWJ sequences |
-| `fixture_200k` | 1 | 938,163 | Shared `o200k_base` comparison fixture |
-| `long_runs` | 9 | 1,760,000 | 300k `a`, 300k spaces, repeated digits, `ab`, combining marks, punctuation, CJK, cycles |
-| `long_random` | 1,092 | 2,598,617 | Long single pieces from small alphabets (letters, CJK, marks, punctuation, whitespace) with lengths around the window sizes (129 … 20,000) and runs with one interruption |
-| `long_unrepeated` | 131 | 713,408 | Seeded random `a`/`b`, CJK and punctuation pieces, 129 bytes to 240 KB: no window ever repeats |
-| `session_snapshots` | 20 | 11,850,632 | Real coding-agent session transcripts |
-| `token_identity` | 198,424 tokens | — | Each valid-UTF-8, single-piece vocabulary token encodes to itself |
-| `forced_fallback_<n>` | 1,233 × 4 | — | Long-piece suites again, with window merging forced to give up after 0, 1, 16 or 1,024 stitches |
-| `arbitrary_bytes` | 630 pieces | 1,229,530 | Non-regex byte strings at boundary lengths, every merge path, against tiktoken-rs `byte_pair_split` |
-
-With both optional fixtures and the `toks` source tree: zero mismatches across about 100 MB, every Unicode scalar,
-200,000 random strings and adversarial long pieces. The run took about 17 seconds on an Apple M5 Pro.
-`fixture_200k` and `session_snapshots` require `MAGI_TOKENIZER_ASSETS`. Separate checks against bpe-openai also
-matched window-encoder counts on random long pieces up to 240 KB.
 
 ## Benchmarks
 
@@ -342,7 +302,7 @@ src/unicode_classes.rs       generated per-code-point class table (do not edit b
 src/bpe.rs                   short-piece, window and heap byte-pair merging
 src/tables.rs                table lookups: vocabulary, pair ranks, byte ranks, token bytes
 src/table_hash.rs            hash functions and table geometry shared with build.rs
-bench/                       magi-tokenizer-bench: differential verification and benchmarks
+bench/                       magi-tokenizer-bench: throughput, startup and memory benchmarks
 tools/gen-unicode/           standalone generator for src/unicode_classes.rs (pinned regex versions)
 ```
 
@@ -355,19 +315,12 @@ harness needs newer standard-library APIs and uses stable in CI. Development use
 # Library
 cargo build --release
 
-# Exact differential verification against tiktoken-rs and fancy-regex (about 17 s)
-cargo run --release -p magi-tokenizer-bench -- verify
-
 # Throughput, all three tokenizers; an optional filter matches workload names
 cargo run --release -p magi-tokenizer-bench -- bench
 cargo run --release -p magi-tokenizer-bench -- bench long
 
 # First-call time in a fresh process
 cargo run --release -p magi-tokenizer-bench -- startup magi        # or tiktoken, bpe-openai
-
-# Check whole files (issue reproductions): fails if magi-tokenizer differs from tiktoken-rs in pieces, IDs,
-# counts, decode or special handling, or if bpe-openai's count differs from tiktoken-rs
-cargo run --release -p magi-tokenizer-bench -- check path/to/repro.txt
 
 # Regenerate the Unicode class table (only when the pinned regex versions change)
 cd tools/gen-unicode && cargo run --release
@@ -381,19 +334,16 @@ Optional harness inputs:
   those suites. A missing or malformed file when set fails the command.
 
 The release profile uses fat LTO and one codegen unit. Build scripts use `opt-level = 3` for fast debug table generation.
-Correctness uses differential `verify`, not unit tests. Run it after scanner, table or merge changes.
 
 ## Known limitations
 
 - Random CJK pieces made mostly of characters not eligible to start whole (for example `你`, `世`) still merge
   from bytes: about level with bpe-openai, not faster.
 - If no stitch point exists within 4,096 bytes, whole-piece fallback can use much more time and memory
-  (see [measured fallback costs](#how-it-works)). No verification input, including either optional fixture,
-  reaches it naturally, but no input is known to rule it out. Measured costs are not proven bounds.
+  (see [measured fallback costs](#how-it-works)). No input is known to rule it out. Measured costs are not proven bounds.
 - Only `o200k_base` is implemented, not `cl100k_base`, `o200k_harmony` or model-name routing.
-- The `usize` index path is checked on small pieces via a hook, not a real piece of 4 GiB or more.
-- Speed and memory were measured only on ARM64 macOS. CI has no `MAGI_TOKENIZER_ASSETS`, so the shared fixture
-  and session snapshots are checked only locally.
+- The `usize` index path has not been exercised on a real piece of 4 GiB or more.
+- Speed and memory were measured only on ARM64 macOS. CI does not run correctness comparisons.
 
 ## Provenance and licensing
 

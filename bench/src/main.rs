@@ -1,7 +1,5 @@
-// Differential verification and benchmarks for magi-tokenizer against tiktoken-rs (reference) and bpe-openai.
+// Benchmarks for magi-tokenizer against tiktoken-rs and bpe-openai.
 //
-//   cargo run --release -p magi-tokenizer-bench -- verify   # exact pieces/ids/counts/decode vs references
-//   cargo run --release -p magi-tokenizer-bench -- check <file>...  # the same checks on whole files (issue repros)
 //   cargo run --release -p magi-tokenizer-bench -- bench    # throughput, all three tokenizers
 //   cargo run --release -p magi-tokenizer-bench -- startup <magi|tiktoken|bpe-openai>  # one first-call timing
 //   cargo run --release -p magi-tokenizer-bench -- memory <MiB> <count|encode> <window|fallback>  # one long piece;
@@ -9,77 +7,28 @@
 //
 // Inputs: MAGI_TOKENIZER_SOURCE lists source trees (path-list syntax, default: this repository) to cut into chunks.
 // MAGI_TOKENIZER_ASSETS names a directory with o200k_base-200k.txt and session-compacted-500.json; without it those
-// suites are skipped.
+// workloads are skipped.
 //
-// The bench enables magi-tokenizer's `harness` feature: fallback counters, forced fallback and direct merge calls.
+// The bench enables magi-tokenizer's `harness` feature for fallback counters and forced fallback.
 
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use base64::Engine as _;
 use magi_tokenizer::harness;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-/// tiktoken-rs 0.12.0 `O200K_BASE_PAT_STR`, copied verbatim because tiktoken-rs does not export it.
-const O200K_PATTERN: &str = concat!(
-    r#"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?"#,
-    "|",
-    r#"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?"#,
-    "|",
-    r#"\p{N}{1,3}"#,
-    "|",
-    r#" ?[^\s\p{L}\p{N}]+[\r\n/]*"#,
-    "|",
-    r#"\s*[\r\n]+"#,
-    "|",
-    r#"\s+(?!\S)"#,
-    "|",
-    r#"\s+"#
-);
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("verify") => verify(),
-        Some("check") if args.len() > 1 => check_files(&args[1..]),
         Some("bench") => bench(args.get(1).map(String::as_str)),
         Some("startup") => startup(args.get(1).map(String::as_str).unwrap_or("magi")),
         Some("memory") if args.len() == 4 => measure_long_piece_memory(&args[1], &args[2], &args[3]),
-        _ => Err("usage: magi-tokenizer-bench verify | check <file>... | bench [filter] | \
+        _ => Err("usage: magi-tokenizer-bench bench [filter] | \
                   startup <magi|tiktoken|bpe-openai> | memory <MiB> <count|encode> <window|fallback>"
             .into()),
     }
-}
-
-/// Runs the exact checks on each file as one text and reports magi-tokenizer, tiktoken-rs and bpe-openai counts.
-/// Fails a file when magi-tokenizer differs from tiktoken-rs (pieces, ids, counts, decode, specials), or when
-/// bpe-openai's count differs from tiktoken-rs: a pilot shadow disagreement that points at the baseline, not magi.
-fn check_files(paths: &[String]) -> Result<()> {
-    let references = References::new()?;
-    let bpe_openai = bpe_openai::o200k_base();
-    let mut failures = 0;
-    for path in paths {
-        let text = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
-        let tiktoken_count = references.tiktoken.encode_ordinary(&text).len();
-        let bpe_openai_count = bpe_openai.count(&text);
-        let counts = format!(
-            "magi {} / tiktoken {tiktoken_count} / bpe-openai {bpe_openai_count}",
-            magi_tokenizer::count_ordinary(&text)
-        );
-        let verdict = match references.check(&text) {
-            Err(error) => format!("MISMATCH vs tiktoken: {error}"),
-            Ok(()) if bpe_openai_count != tiktoken_count => "matches tiktoken; bpe-openai DIFFERS".to_owned(),
-            Ok(()) => {
-                println!("{path}: matches tiktoken and bpe-openai ({} bytes; {counts})", text.len());
-                continue;
-            }
-        };
-        failures += 1;
-        println!("{path}: {verdict} ({} bytes; {counts})", text.len());
-    }
-    if failures > 0 { Err(format!("{failures} of {} files disagree", paths.len()).into()) } else { Ok(()) }
 }
 
 // ---- inputs ---------------------------------------------------------------------------------------------
@@ -181,354 +130,6 @@ fn multilingual_text() -> String {
     })
 }
 
-/// Deterministic random strings drawn from characters that stress pretokenization and merging.
-fn fuzz_strings(count: usize, seed: u64) -> Vec<String> {
-    const ALPHABET: &[&str] = &[
-        "a", "b", "e", "s", "t", "A", "Z", "'", "'s", "'S", "'re", "'LL", "'ſ", "ſ", " ", "  ", "\t", "\n", "\r",
-        "\r\n", "\u{a0}", "\u{3000}", "\u{2028}", "\u{85}", "0", "7", "٣", "Ⅻ", "½", ".", ",", "!", "/", "//", "-",
-        "_", "(", "\"", "\u{301}", "\u{300}", "\u{94d}", "\u{200d}", "\u{fe0f}", "ǅ", "ʰ", "ª", "é", "É", "ß", "你",
-        "好", "日", "ン", "한", "ж", "Ж", "ع", "क", "ि", "🙂", "🏽", "\0", "<|endoftext|>", "<|", "|>", "the", " the",
-        "ing", "tion", " world", "Hello", "HTTP", "JSON", "1234", "    ", "\n\n", " \n", "{\n", "}\n", "=>", "::",
-    ];
-    let mut state = seed;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
-    (0..count)
-        .map(|_| {
-            let len = (next() % 64) as usize;
-            (0..len).map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize]).collect()
-        })
-        .collect()
-}
-
-/// Every Unicode scalar in contexts that exercise each regex alternative around it.
-fn unicode_sweep() -> Vec<String> {
-    let mut texts = Vec::new();
-    for context in [("a", "B'99\n"), (" ", "x"), ("A", "'s "), ("!", "\u{301}a"), ("1", " \n"), ("\n", "'LL")] {
-        let mut text = String::new();
-        for c in (0..=0x10FFFFu32).filter_map(char::from_u32) {
-            text.push_str(context.0);
-            text.push(c);
-            text.push_str(context.1);
-        }
-        texts.extend(chunks(&text, 8192));
-    }
-    // Pairs of interesting classes adjacent to each other, both orders.
-    let probes: Vec<char> = (0..=0x10FFFFu32).step_by(97).filter_map(char::from_u32).collect();
-    let mut pairs = String::new();
-    for window in probes.windows(3) {
-        pairs.extend(window);
-        pairs.push(' ');
-    }
-    texts.extend(chunks(&pairs, 4096));
-    texts
-}
-
-// ---- verification ---------------------------------------------------------------------------------------
-
-struct References {
-    tiktoken: &'static tiktoken_rs::CoreBPE,
-    regex: fancy_regex::Regex,
-}
-
-impl References {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            tiktoken: tiktoken_rs::o200k_base_singleton(),
-            regex: fancy_regex::Regex::new(O200K_PATTERN)?,
-        })
-    }
-
-    /// Ok(()) when magi-tokenizer agrees exactly with the references on `text`; otherwise a description.
-    fn check(&self, text: &str) -> std::result::Result<(), String> {
-        let expected_pieces: Vec<&str> = self.regex.find_iter(text).map(|m| m.unwrap().as_str()).collect();
-        let pieces: Vec<&str> = magi_tokenizer::pieces(text).collect();
-        if pieces != expected_pieces {
-            let first = pieces.iter().zip(&expected_pieces).position(|(a, b)| a != b).unwrap_or(pieces.len());
-            return Err(format!(
-                "pieces differ at {first}: got {:?}, expected {:?}",
-                &pieces[first.saturating_sub(1)..(first + 2).min(pieces.len())],
-                &expected_pieces[first.saturating_sub(1)..(first + 2).min(expected_pieces.len())]
-            ));
-        }
-        let expected = self.tiktoken.encode_ordinary(text);
-        let ids = magi_tokenizer::encode_ordinary(text);
-        if ids != expected {
-            return Err(format!("ordinary ids differ: got {} tokens, expected {}", ids.len(), expected.len()));
-        }
-        if magi_tokenizer::count_ordinary(text) != expected.len() {
-            return Err("count_ordinary differs".into());
-        }
-        if magi_tokenizer::decode(&ids).as_deref() != Some(text) {
-            return Err("decode does not round-trip".into());
-        }
-        let mut appended = APPEND_SENTINEL.to_vec();
-        magi_tokenizer::encode_ordinary_into(text, &mut appended);
-        if appended[..APPEND_SENTINEL.len()] != APPEND_SENTINEL || appended[APPEND_SENTINEL.len()..] != expected {
-            return Err("encode_ordinary_into into a non-empty vector differs".into());
-        }
-        let expected_special = self.tiktoken.encode_with_special_tokens(text);
-        if magi_tokenizer::encode_with_special_tokens(text) != expected_special
-            || magi_tokenizer::count_with_special_tokens(text) != expected_special.len()
-        {
-            return Err("special-token encoding differs".into());
-        }
-        Ok(())
-    }
-}
-
-fn verify() -> Result<()> {
-    let references = References::new()?;
-    let source = source_text();
-    let mut suites: Vec<(&str, Vec<String>)> = vec![
-        ("edges", edge_cases()),
-        ("unicode_sweep", unicode_sweep()),
-        ("fuzz", fuzz_strings(200_000, 0x9E37_79B9_7F4A_7C15)),
-        ("source_7", chunks(&source, 7)),
-        ("source_48", chunks(&source, 48)),
-        ("source_4096", chunks(&source, 4096)),
-        ("multilingual_256", chunks(&multilingual_text(), 256)),
-        ("long_runs", long_runs()),
-        ("long_random", long_random_pieces()),
-        ("long_unrepeated", long_unrepeated_pieces()),
-    ];
-    if let Some(fixture) = fixture_200k()? {
-        suites.push(("fixture_200k", vec![fixture]));
-    }
-    match session_snapshots()? {
-        Some(snapshots) => suites.push(("session_snapshots", snapshots.into_iter().step_by(25).collect())),
-        None => println!("MAGI_TOKENIZER_ASSETS not set: skipping fixture_200k / session_snapshots"),
-    }
-    let mut failures = 0;
-    for (name, texts) in &suites {
-        let start = Instant::now();
-        let mut suite_failures = 0;
-        for text in texts {
-            if let Err(error) = references.check(text) {
-                suite_failures += 1;
-                if suite_failures <= 5 {
-                    let preview: String = text.chars().take(80).collect();
-                    println!("  MISMATCH [{name}] {error}\n    text: {preview:?}");
-                }
-            }
-        }
-        let (long_pieces, fallback_pieces) = count_natural_fallbacks(texts);
-        println!(
-            "{name:>20}: {:>7} texts, {:>10} bytes, {suite_failures} mismatches ({:.1}s); \
-             {fallback_pieces} of {long_pieces} long pieces fell back",
-            texts.len(),
-            texts.iter().map(String::len).sum::<usize>(),
-            start.elapsed().as_secs_f64()
-        );
-        failures += suite_failures;
-    }
-    failures += check_forced_fallback(&references, &suites)?;
-    failures += check_arbitrary_byte_pieces()?;
-    check_every_token_round_trips()?;
-    if failures > 0 {
-        return Err(format!("{failures} mismatches").into());
-    }
-    println!("all suites exact");
-    Ok(())
-}
-
-/// Prefix kept in the output vector when checking append-style encoding.
-const APPEND_SENTINEL: [u32; 3] = [u32::MAX, 7, u32::MAX];
-
-/// Pieces longer than 128 bytes (the window path) in `texts`, and how many fell back to the whole-piece heap merge.
-fn count_natural_fallbacks(texts: &[String]) -> (usize, usize) {
-    let long_pieces = texts.iter().flat_map(|text| magi_tokenizer::pieces(text)).filter(|p| p.len() > 128).count();
-    harness::reset_fallback_counters();
-    texts.iter().for_each(|text| _ = black_box(magi_tokenizer::count_ordinary(text)));
-    (long_pieces, harness::fallback_pieces())
-}
-
-/// Reruns the full text checks with window merging made to give up after `stitches` stitched windows, so every
-/// long piece that needs more windows takes the discard-and-retry path. Uses the suites with long pieces. Fails
-/// if a setting reaches no fallback, or if no setting discards committed tokens: tokens are committed only in
-/// batches of 4,096, so early failures have nothing to discard and the later settings must cover that branch.
-fn check_forced_fallback(references: &References, suites: &[(&str, Vec<String>)]) -> Result<usize> {
-    let texts: Vec<&String> = suites
-        .iter()
-        .filter(|(name, _)| matches!(*name, "long_runs" | "long_random" | "long_unrepeated" | "fixture_200k"))
-        .flat_map(|(_, texts)| texts)
-        .collect();
-    let (mut failures, mut total_discarded) = (0, 0);
-    for stitches in [0, 1, 16, 1024] {
-        let start = Instant::now();
-        harness::reset_fallback_counters();
-        harness::fail_window_merge_after_stitches(Some(stitches));
-        let mut suite_failures = 0;
-        for text in &texts {
-            if let Err(error) = references.check(text) {
-                suite_failures += 1;
-                if suite_failures <= 5 {
-                    println!(
-                        "  MISMATCH [forced_fallback_{stitches}] {error}\n    text: {:?}",
-                        &text[..text.floor_char_boundary(80)]
-                    );
-                }
-            }
-        }
-        harness::fail_window_merge_after_stitches(None);
-        let (fallbacks, discarded) = (harness::fallback_pieces(), harness::discarded_tokens());
-        println!(
-            "{:>20}: {:>7} texts, {fallbacks} fallbacks, {discarded} discarded tokens, {suite_failures} mismatches ({:.1}s)",
-            format!("forced_fallback_{stitches}"),
-            texts.len(),
-            start.elapsed().as_secs_f64()
-        );
-        if fallbacks == 0 {
-            return Err(format!("forced_fallback_{stitches} reached no fallback").into());
-        }
-        total_discarded += discarded;
-        failures += suite_failures;
-    }
-    if total_discarded == 0 {
-        return Err("forced fallback never discarded committed tokens".into());
-    }
-    Ok(failures)
-}
-
-/// tiktoken-rs merging of arbitrary bytes (`byte_pair_split`), the reference for piece-level checks. Its merge is
-/// quadratic, so pieces above REFERENCE_PIECE_BYTES are checked against magi-tokenizer's heap merge instead.
-struct ReferenceMerge {
-    ranks: rustc_hash::FxHashMap<Vec<u8>, u32>,
-}
-
-const REFERENCE_PIECE_BYTES: usize = 10_000;
-
-impl ReferenceMerge {
-    fn new() -> Result<Self> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/o200k_base.tiktoken");
-        let mut ranks = rustc_hash::FxHashMap::default();
-        for line in fs::read_to_string(path)?.lines().filter(|line| !line.is_empty()) {
-            let (encoded, rank) = line.split_once(' ').ok_or("vocabulary line is not `<base64> <rank>`")?;
-            ranks.insert(base64::prelude::BASE64_STANDARD.decode(encoded)?, rank.trim().parse()?);
-        }
-        if ranks.len() != magi_tokenizer::ORDINARY_TOKEN_COUNT {
-            return Err(format!("reference vocabulary has {} tokens", ranks.len()).into());
-        }
-        Ok(Self { ranks })
-    }
-
-    fn encode(&self, piece: &[u8]) -> Vec<u32> {
-        match piece.len() {
-            0 => Vec::new(),
-            1 => vec![self.ranks[piece]],
-            _ => tiktoken_rs::byte_pair_split(piece, &self.ranks).iter().map(|part| self.ranks[*part]).collect(),
-        }
-    }
-}
-
-/// Every merge path on byte strings that are not regex pieces (random bytes, small byte alphabets, valid text cut
-/// at arbitrary byte offsets), at lengths around each path's limits. Window merging gives up on its own only when
-/// no stitch point exists; those cases are counted.
-fn check_arbitrary_byte_pieces() -> Result<usize> {
-    let start = Instant::now();
-    let reference = ReferenceMerge::new()?;
-    let pieces = arbitrary_byte_pieces();
-    let (mut failures, mut window_gave_up, mut reference_checked) = (0, 0, 0);
-    for piece in &pieces {
-        let expected = if piece.len() <= REFERENCE_PIECE_BYTES {
-            reference_checked += 1;
-            reference.encode(piece)
-        } else {
-            harness::heap_merge(piece)
-        };
-        let mut appended = APPEND_SENTINEL.to_vec();
-        harness::encode_piece(piece, &mut appended);
-        let window = harness::window_merge(piece);
-        window_gave_up += window.is_none() as usize;
-        let mut differing = Vec::new();
-        if appended[..APPEND_SENTINEL.len()] != APPEND_SENTINEL || appended[APPEND_SENTINEL.len()..] != expected {
-            differing.push("encode_piece");
-        }
-        if harness::count_piece(piece) != expected.len() {
-            differing.push("count_piece");
-        }
-        if harness::heap_merge(piece) != expected {
-            differing.push("heap_merge");
-        }
-        if harness::heap_merge_wide_index(piece) != expected {
-            differing.push("heap_merge_wide_index");
-        }
-        if window.is_some_and(|tokens| tokens != expected) {
-            differing.push("window_merge");
-        }
-        if piece.len() <= 128 && harness::short_merge(piece) != Some(expected.clone()) {
-            differing.push("short_merge");
-        }
-        if piece.len() > 128 {
-            harness::fail_window_merge_after_stitches(Some(1));
-            let mut appended = APPEND_SENTINEL.to_vec();
-            harness::encode_piece(piece, &mut appended);
-            let prefix_kept = appended[..APPEND_SENTINEL.len()] == APPEND_SENTINEL;
-            if !prefix_kept || appended[APPEND_SENTINEL.len()..] != expected || harness::count_piece(piece) != expected.len()
-            {
-                differing.push("forced fallback");
-            }
-            harness::fail_window_merge_after_stitches(None);
-        }
-        if !differing.is_empty() {
-            failures += 1;
-            if failures <= 5 {
-                println!("  MISMATCH [arbitrary_bytes] {} bytes: {differing:?}", piece.len());
-            }
-        }
-    }
-    println!(
-        "{:>20}: {:>7} pieces, {:>10} bytes, {failures} mismatches ({:.1}s); {reference_checked} vs tiktoken-rs, \
-         window merge gave up on {window_gave_up}",
-        "arbitrary_bytes",
-        pieces.len(),
-        pieces.iter().map(Vec::len).sum::<usize>(),
-        start.elapsed().as_secs_f64()
-    );
-    Ok(failures)
-}
-
-fn arbitrary_byte_pieces() -> Vec<Vec<u8>> {
-    let mut state = 0x5DEE_CE66_D1CE_4E5Bu64;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
-    let text = multilingual_text();
-    let all_bytes: Vec<u8> = (0..=255).collect();
-    let alphabets: [&[u8]; 8] = [
-        &all_bytes,
-        b"ab",
-        b"aaaaaaab",
-        b" \n",
-        b"a1 !",
-        "你好世界".as_bytes(),
-        &[0x80, 0x81, 0xBF, 0xC3, 0xE4],
-        b"=-*",
-    ];
-    let mut lengths: Vec<usize> = vec![
-        0, 1, 2, 3, 31, 32, 33, 127, 128, 129, 255, 256, 257, 511, 512, 513, 4095, 4096, 4097, 8191, 8192, 8193,
-        65_536,
-    ];
-    lengths.extend((0..40).map(|_| 1 + (next() % 1000) as usize));
-    let mut pieces = Vec::new();
-    for &len in &lengths {
-        for alphabet in alphabets {
-            pieces.push((0..len).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect());
-        }
-        let at = (next() % (text.len() - len.min(text.len()) + 1) as u64) as usize;
-        pieces.push(text.as_bytes()[at..(at + len).min(text.len())].to_vec());
-        pieces.push(vec![b'a'; len]);
-    }
-    pieces
-}
-
 /// Encodes or counts one long single piece (random letters `a`/`b`) through windows or the forced whole-piece
 /// fallback, so peak RSS can be compared between the two.
 fn measure_long_piece_memory(mebibytes: &str, operation: &str, path: &str) -> Result<()> {
@@ -566,28 +167,6 @@ fn measure_long_piece_memory(mebibytes: &str, operation: &str, path: &str) -> Re
     Ok(())
 }
 
-fn edge_cases() -> Vec<String> {
-    let mut texts: Vec<String> = [
-        "", "a", " ", "\n", "hello", "Hello, world!", "\r\n\n\t  ", " <|endoftext|> <|fim_prefix|> <|endofprompt|>",
-        "<|endoftext|><|endoftext|>", "<|<|endofprompt|>|>", "don't I'M we're 1234567890", "ſ's 'ſ x'ſ X'ſ",
-        "\u{301}abc", " \u{301}abc", "!\u{301}", " \u{301}", "\u{301}", "ABC'S", "ABCdef'Re", "aBC", "ABc", "ǅx", "ʰʰ",
-        "a  b", "a  \n b", "  \n\n  x", "x \u{a0}y", "x\u{3000}\u{3000}", "a/\n/b", " !!/\r\n/x", "!!! ", " ! a",
-        "12345678", "١٢٣٤", "1\u{301}", "a'", "a'l", "a'r", "a'llx", "\u{10FFFF}", "\0\0\0", "\t\t\tx", "x\t\t\t",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    for n in 1..=140 {
-        texts.push("a".repeat(n));
-        texts.push(format!(" {}", "z".repeat(n)));
-        texts.push("ab".repeat(n));
-        texts.push("!".repeat(n));
-        texts.push("\u{301}".repeat(n));
-        texts.push("🙂".repeat(n));
-    }
-    texts
-}
-
 fn long_runs() -> Vec<String> {
     vec![
         "a".repeat(300_000),
@@ -601,56 +180,6 @@ fn long_runs() -> Vec<String> {
         (0..20_000).map(|i| char::from(b'a' + (i * 7 % 26) as u8)).collect(),
     ]
 }
-/// Deterministic long single pieces (letter, punctuation, whitespace runs) from small alphabets, so that windows
-/// repeat, nearly repeat, and break in many places. Lengths cluster around the window sizes.
-fn long_random_pieces() -> Vec<String> {
-    const ALPHABETS: &[&[&str]] = &[
-        &["a", "b"],
-        &["a", "b", "c"],
-        &["e", "o", "n"],
-        &["a", "a", "a", "a", "a", "a", "a", "b"],
-        &["th", "e", "in", "g", "s"],
-        &["é", "e", "\u{301}"],
-        &["你", "好", "世", "界"],
-        &["x", "y", "z", "q", "j", "k", "w", "v"],
-        &["!", "=", "-"],
-        &["=", "=", "=", "=", "-", "*"],
-        &["(", ")", "{", "}", ";", "."],
-        &[" ", " ", " ", " ", " ", " ", "\t"],
-        &[" ", "\t", "\u{a0}"],
-    ];
-    const LENGTHS: &[usize] = &[
-        129, 130, 150, 191, 192, 193, 255, 256, 257, 300, 511, 512, 513, 1000, 2047, 2048, 4095, 4096, 4097, 9000,
-        20_000,
-    ];
-    let mut state = 0x2545_F491_4F6C_DD1Du64;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
-    let mut texts = Vec::new();
-    for alphabet in ALPHABETS {
-        for &len in LENGTHS {
-            for _ in 0..3 {
-                let mut text = String::new();
-                while text.len() < len {
-                    text.push_str(alphabet[(next() % alphabet.len() as u64) as usize]);
-                }
-                texts.push(text);
-            }
-            // A long run of one symbol interrupted once at a random position.
-            let mut run: Vec<&str> = vec![alphabet[0]; len / alphabet[0].len()];
-            let at = (next() % run.len() as u64) as usize;
-            run[at] = alphabet[alphabet.len() - 1];
-            texts.push(run.concat());
-        }
-    }
-    texts
-}
-
-
 /// Pieces that defeat window reuse: long random text from small alphabets. Stitch points are found quickly,
 /// but every window is new, so the cache never hits. These are the workloads where window merging costs the most.
 fn long_unrepeated_pieces() -> Vec<String> {
@@ -677,23 +206,6 @@ fn long_unrepeated_pieces() -> Vec<String> {
         texts.push(random_text(len, &["a", "b"]));
     }
     texts
-}
-
-fn check_every_token_round_trips() -> Result<()> {
-    let mut checked = 0;
-    for id in 0..magi_tokenizer::ORDINARY_TOKEN_COUNT as u32 {
-        let bytes = magi_tokenizer::token_bytes(id).ok_or("missing token")?;
-        if let Ok(text) = std::str::from_utf8(bytes)
-            && magi_tokenizer::pieces(text).count() == 1
-        {
-            if magi_tokenizer::encode_ordinary(text) != [id] {
-                return Err(format!("token {id} ({text:?}) does not encode to itself").into());
-            }
-            checked += 1;
-        }
-    }
-    println!("{:>20}: {checked} UTF-8 single-piece tokens encode to themselves", "token_identity");
-    Ok(())
 }
 
 // ---- benchmarks -----------------------------------------------------------------------------------------

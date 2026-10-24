@@ -180,13 +180,10 @@ version = "0.0.2"
 name = "magi-tokenizer-bench"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
  "bpe-openai",
- "fancy-regex",
  "magi-tokenizer",
  "regex",
  "regex-syntax",
- "rustc-hash",
  "serde_json",
  "tiktoken-rs",
 ]

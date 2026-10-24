@@ -44,7 +44,7 @@ pub(crate) fn count_piece(piece: &[u8]) -> usize {
         let mut count = 0;
         if !merge_in_windows(piece, |tokens| count += tokens.len()) {
             #[cfg(feature = "harness")]
-            crate::harness::record_fallback(count);
+            crate::harness::record_fallback();
             count = 0;
             merge_long_piece(piece, |_| count += 1);
         }
@@ -71,7 +71,7 @@ fn encode_long_piece(piece: &[u8], out: &mut Vec<u32>) {
     let base = out.len();
     if !merge_in_windows(piece, |tokens| out.extend_from_slice(tokens)) {
         #[cfg(feature = "harness")]
-        crate::harness::record_fallback(out.len() - base);
+        crate::harness::record_fallback();
         out.truncate(base);
         merge_long_piece(piece, |id| out.push(id));
     }
@@ -274,17 +274,6 @@ fn starting_merge_rank(piece: &[u8], left: StartingPart, right: StartingPart) ->
     }
 }
 
-/// Stack merge alone, without the whole-token shortcut; None for pieces over SHORT_PIECE_BYTES.
-#[cfg(feature = "harness")]
-pub(crate) fn short_merge(piece: &[u8]) -> Option<Vec<u32>> {
-    if piece.len() > SHORT_PIECE_BYTES {
-        return None;
-    }
-    let mut tokens = [0u32; SHORT_PIECE_BYTES];
-    let count = merge_short_piece(piece, &mut tokens);
-    Some(tokens[..count].to_vec())
-}
-
 /// Keeps parts packed at the front: after each merge the parts and ranks above it shift down by one, so each
 /// minimum search covers only the live parts. `position` keeps the leftmost of tied ranks.
 #[inline]
@@ -445,18 +434,6 @@ fn merge_long_piece(piece: &[u8], emit: impl FnMut(u32)) {
     } else {
         merge_parts::<usize>(piece, emit);
     }
-}
-
-/// Whole-piece heap merge with `u32` part indices, or `usize` ones when `wide_index` is set.
-#[cfg(feature = "harness")]
-pub(crate) fn heap_merge(piece: &[u8], wide_index: bool) -> Vec<u32> {
-    let mut tokens = Vec::new();
-    if wide_index {
-        merge_parts::<usize>(piece, |id| tokens.push(id));
-    } else {
-        merge_parts::<u32>(piece, |id| tokens.push(id));
-    }
-    tokens
 }
 
 fn merge_parts<I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u32)) {

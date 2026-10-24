@@ -1,7 +1,8 @@
 # magi-tokenizer
 
 A fast Rust tokenizer for OpenAI's `o200k_base` and (optional feature) `cl100k_base` encodings. It produces the
-same token IDs as [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary` and `encode_with_special_tokens`.
+same token IDs as [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary`, `encode_with_special_tokens`
+and `encode` with an allow-list of special tokens.
 
 Experimental, version 0.0.2. No automated correctness suite is included. See
 [Known limitations](#known-limitations) and [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues).
@@ -25,6 +26,11 @@ assert_eq!(magi_tokenizer::count_ordinary(text), ids.len());
 // Recognise special tokens (tiktoken `encode_with_special_tokens`).
 let with_special = magi_tokenizer::encode_with_special_tokens(text);
 assert_eq!(*with_special.last().unwrap(), magi_tokenizer::END_OF_TEXT);
+
+// Like Python tiktoken's default `encode()`: special-token text not in the allow-list is an error.
+let error = magi_tokenizer::encode(text, &[]).unwrap_err();
+assert_eq!((error.token, error.position), ("<|endoftext|>", 14));
+assert_eq!(magi_tokenizer::encode(text, &["<|endoftext|>"]).unwrap(), with_special);
 
 assert_eq!(magi_tokenizer::decode(&ids).as_deref(), Some(text));
 ```
@@ -61,10 +67,18 @@ assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
   compatibility promise, and the API can change between releases. For git dependencies, pin a full commit hash
   whose CI passed. Do not enable `harness`:
   it exposes memory-benchmark hooks for `bench/`, not a stable API.
-- `encode_ordinary` matches tiktoken's `encode_ordinary`. `encode_with_special_tokens` matches
-  `encode(text, allowed_special="all")`. To reject special-token text like tiktoken's default `encode()`, or allow
-  only some special tokens, check the strings in `SPECIAL_TOKENS` yourself before encoding.
-- For counts without a token list, use `count_ordinary` or `count_with_special_tokens`. They match the encode functions' lengths.
+- Special-token modes ([#10](https://github.com/magimetal/magi-tokenizer/issues/10)):
+  - `encode_ordinary` matches tiktoken's `encode_ordinary`: special-token text is ordinary text.
+  - `encode_with_special_tokens` matches `encode(text, allowed_special="all")`.
+  - `encode_allowing_special(text, allowed)` matches tiktoken-rs 0.12.0 `CoreBPE::encode(text, allowed)`: only listed
+    special tokens are recognised; other special-token text is ordinary text.
+  - `encode(text, allowed)` matches Python tiktoken's default `encode(text, allowed_special=allowed)`: special-token
+    text not in `allowed` returns `Err(DisallowedSpecialToken)` with the leftmost such token and its byte offset,
+    otherwise the same IDs as `encode_allowing_special`. tiktoken-rs has no such error, so the reference is Python
+    tiktoken's check (`disallowed_special="all"`). Pass `&[]` to reject all special-token text from untrusted input.
+  - Names in `allowed` that are not special tokens of the encoding are ignored.
+- For counts without a token list, use `count_ordinary`, `count_with_special_tokens`, `count_allowing_special` or
+  `count`. They match the encode functions' lengths, and `count` returns the same error as `encode`.
 - Cap untrusted input before calling the library. Encoding allocates 4 bytes per output token. The whole-piece
   heap fallback uses memory proportional to piece length: 26 to 27 bytes per piece byte in measured runs, not a
   proven bound. No tested input reaches it naturally, but none is known to rule it out. There is no memory-limit setting.
@@ -109,11 +123,16 @@ functions; the crate root re-exports `o200k_base`.
 | `count_ordinary(text) -> usize` | Number of tokens `encode_ordinary` returns. |
 | `encode_with_special_tokens(text) -> Vec<u32>` | Token IDs with the encoding's special tokens recognised. |
 | `count_with_special_tokens(text) -> usize` | Number of tokens `encode_with_special_tokens` returns. |
+| `encode_allowing_special(text, allowed) -> Vec<u32>` | Token IDs with only the special tokens in `allowed: &[&str]` recognised. |
+| `count_allowing_special(text, allowed) -> usize` | Number of tokens `encode_allowing_special` returns. |
+| `encode(text, allowed) -> Result<Vec<u32>, DisallowedSpecialToken>` | Like `encode_allowing_special`, but an error if the text contains special-token text not in `allowed`. |
+| `count(text, allowed) -> Result<usize, DisallowedSpecialToken>` | Number of tokens `encode` returns, or its error. |
 | `token_bytes(id) -> Option<&'static [u8]>` | Bytes of one ordinary or special token; `None` for an unknown ID. |
 | `decode_bytes(ids) -> Option<Vec<u8>>` | Concatenated bytes; `None` if an ID is unknown. |
 | `decode(ids) -> Option<String>` | Decoded text; `None` if an ID is unknown or the bytes are not valid UTF-8. |
 
-Constants: `END_OF_TEXT`, `END_OF_PROMPT`, `SPECIAL_TOKENS`, `ORDINARY_TOKEN_COUNT`.
+Constants: `END_OF_TEXT`, `END_OF_PROMPT`, `SPECIAL_TOKENS`, `ORDINARY_TOKEN_COUNT`. Error type (crate root):
+`DisallowedSpecialToken { token, position }`.
 
 ### Panics
 
@@ -265,7 +284,9 @@ The heap merge also handles windows over 128 bytes. It uses `u32` positions, swi
 
 `magi-tokenizer-bench bench` compares count and encode throughput against tiktoken-rs 0.12.0 and bpe-openai 0.3.2
 for both encodings. Before timing, it checks that magi-tokenizer returns tiktoken's exact token IDs, counts and
-decoded text for every workload, plus special tokens spliced between texts, a Unicode sweep (planes 0–2 and 14 in
+decoded text for every workload, plus special tokens spliced between texts (all allowed, and allow-lists checked
+against tiktoken-rs `CoreBPE::encode`, with `encode`'s error checked against Python tiktoken's leftmost-disallowed
+rule), a Unicode sweep (planes 0–2 and 14 in
 six contexts), short random strings around scanner edge cases and the forced whole-piece fallback. It then times
 five jobs: magi count/encode, bpe-openai count/encode and tiktoken encode. Each runs for at least 150 ms in five
 rounds, with rotated order. Figures are median rounds. For tiktoken-rs, which has no separate count, both figures use encode.

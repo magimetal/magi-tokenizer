@@ -15,12 +15,13 @@
 // The bench enables magi-tokenizer's `harness` feature for fallback counters and forced fallback, and
 // `cl100k_base` for the second encoding.
 
+use std::collections::HashSet;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use magi_tokenizer::harness;
+use magi_tokenizer::{DisallowedSpecialToken, harness};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> Result<()> {
@@ -248,6 +249,10 @@ struct Encoding {
     count: fn(&str) -> usize,
     encode_with_special_tokens: fn(&str) -> Vec<u32>,
     count_with_special_tokens: fn(&str) -> usize,
+    encode_allowing_special: fn(&str, &[&str]) -> Vec<u32>,
+    count_allowing_special: fn(&str, &[&str]) -> usize,
+    encode_rejecting_special: fn(&str, &[&str]) -> std::result::Result<Vec<u32>, DisallowedSpecialToken>,
+    count_rejecting_special: fn(&str, &[&str]) -> std::result::Result<usize, DisallowedSpecialToken>,
     decode: fn(&[u32]) -> Option<String>,
 }
 
@@ -263,6 +268,10 @@ fn encodings() -> [Encoding; 2] {
             count: o200k_base::count_ordinary,
             encode_with_special_tokens: o200k_base::encode_with_special_tokens,
             count_with_special_tokens: o200k_base::count_with_special_tokens,
+            encode_allowing_special: o200k_base::encode_allowing_special,
+            count_allowing_special: o200k_base::count_allowing_special,
+            encode_rejecting_special: o200k_base::encode,
+            count_rejecting_special: o200k_base::count,
             decode: o200k_base::decode,
         },
         Encoding {
@@ -274,6 +283,10 @@ fn encodings() -> [Encoding; 2] {
             count: cl100k_base::count_ordinary,
             encode_with_special_tokens: cl100k_base::encode_with_special_tokens,
             count_with_special_tokens: cl100k_base::count_with_special_tokens,
+            encode_allowing_special: cl100k_base::encode_allowing_special,
+            count_allowing_special: cl100k_base::count_allowing_special,
+            encode_rejecting_special: cl100k_base::encode,
+            count_rejecting_special: cl100k_base::count,
             decode: cl100k_base::decode,
         },
     ]
@@ -312,8 +325,34 @@ fn unicode_sweep() -> Vec<String> {
         .collect()
 }
 
+/// Python tiktoken's default `encode()` check: the leftmost special-token text not in `allowed_special`.
+fn python_disallowed_special(
+    encoding: &Encoding,
+    text: &str,
+    allowed_special: &[&str],
+) -> Option<DisallowedSpecialToken> {
+    encoding
+        .special_tokens
+        .iter()
+        .filter(|(name, _)| !allowed_special.contains(name))
+        .filter_map(|&(token, _)| Some(DisallowedSpecialToken { token, position: text.find(token)? }))
+        .min_by_key(|error| error.position)
+}
+
+/// Allow-lists checked against tiktoken-rs `CoreBPE::encode`: none, each token alone and all but each token.
+fn allow_lists(encoding: &Encoding) -> Vec<Vec<&'static str>> {
+    let names: Vec<&'static str> = encoding.special_tokens.iter().map(|(name, _)| *name).collect();
+    let mut lists = vec![Vec::new()];
+    for name in &names {
+        lists.push(vec![*name]);
+        lists.push(names.iter().copied().filter(|other| other != name).collect());
+    }
+    lists
+}
+
 /// Asserts that magi-tokenizer gives tiktoken's exact ids for `texts`, ordinary and with special tokens, that counts
-/// match and that decoding round-trips. Special tokens are spliced between texts so they are matched in context.
+/// match and that decoding round-trips. Special tokens are spliced between texts so they are matched in context,
+/// and allow-lists and Python tiktoken's disallowed-special error are checked on the spliced text.
 fn check_exact(encoding: &Encoding, workload: &str, texts: &[String]) {
     let name = format!("{}/{workload}", encoding.name);
     for (index, text) in texts.iter().enumerate() {
@@ -321,6 +360,10 @@ fn check_exact(encoding: &Encoding, workload: &str, texts: &[String]) {
         assert_eq!((encoding.encode)(text), expected, "{name}: ids differ for text {index}: {text:?}");
         assert_eq!((encoding.count)(text), expected.len(), "{name}: count differs for text {index}");
         assert_eq!((encoding.decode)(&expected).as_deref(), Some(text.as_str()), "{name}: decode differs");
+        let rejected = python_disallowed_special(encoding, text, &[]).map_or(Ok(expected), Err);
+        let rejected_count = rejected.as_ref().map(Vec::len).map_err(|error| *error);
+        assert_eq!((encoding.count_rejecting_special)(text, &[]), rejected_count, "{name}: encode count differs");
+        assert_eq!((encoding.encode_rejecting_special)(text, &[]), rejected, "{name}: encode differs for text {index}");
     }
     let joined = texts.iter().take(2000).enumerate().fold(String::new(), |mut joined, (index, text)| {
         joined.push_str(text);
@@ -332,6 +375,19 @@ fn check_exact(encoding: &Encoding, workload: &str, texts: &[String]) {
     assert_eq!((encoding.encode_with_special_tokens)(&joined), expected, "{name}: special-token ids differ");
     assert_eq!((encoding.count_with_special_tokens)(&joined), expected.len(), "{name}: special-token count differs");
     assert_eq!((encoding.decode)(&expected).as_deref(), Some(joined.as_str()), "{name}: special-token decode differs");
+    for allowed in allow_lists(encoding) {
+        let expected = encoding.tiktoken.encode(&joined, &allowed.iter().copied().collect::<HashSet<_>>()).unwrap().0;
+        let ids = (encoding.encode_allowing_special)(&joined, &allowed);
+        assert_eq!(ids, expected, "{name}: ids differ allowing {allowed:?}");
+        let count = (encoding.count_allowing_special)(&joined, &allowed);
+        assert_eq!(count, expected.len(), "{name}: count differs allowing {allowed:?}");
+        let rejected = python_disallowed_special(encoding, &joined, &allowed).map_or(Ok(expected), Err);
+        let rejected_count = rejected.as_ref().map(Vec::len).map_err(|error| *error);
+        let count = (encoding.count_rejecting_special)(&joined, &allowed);
+        assert_eq!(count, rejected_count, "{name}: encode count differs allowing {allowed:?}");
+        let ids = (encoding.encode_rejecting_special)(&joined, &allowed);
+        assert_eq!(ids, rejected, "{name}: encode differs allowing {allowed:?}");
+    }
 }
 
 fn bench(filter: Option<&str>) -> Result<()> {

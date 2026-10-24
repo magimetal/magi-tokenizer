@@ -1,5 +1,8 @@
 # magi-code pilot: handoff
 
+> **Archived 2026-10-23.** Kept for history; not maintained. Its gap table and issue links are out of date: #1, #6
+> and #7 are closed. Current gaps are tracked as GitHub issues #8–#17.
+
 This document is for agents who work in magi-code (`~/Dev/magi-code`). It tells you how to pilot magi-tokenizer as
 the `o200k_base` counter, which code to change, which behaviour must stay the same, and how to report problems.
 The tracking issue is [#7](https://github.com/magimetal/magi-tokenizer/issues/7).

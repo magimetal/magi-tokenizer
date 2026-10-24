@@ -5,8 +5,7 @@ A fast Rust tokenizer for OpenAI's `o200k_base` encoding. It produces the same t
 Speed improvements must pass the full verification suite.
 
 Experimental, version 0.0.2. The full [verification suite](#verification) passes. See
-[Known limitations](#known-limitations), [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues)
-and the [magi-code pilot plan](docs/magi-code-pilot.md).
+[Known limitations](#known-limitations) and [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues).
 
 ## Quick start
 

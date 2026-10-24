@@ -1,4 +1,4 @@
-// Benchmarks for magi-tokenizer against tiktoken-rs and bpe-openai, for o200k_base and cl100k_base.
+// Benchmarks for magi-tokenizer against tiktoken-rs and bpe-openai, for o200k_base, o200k_harmony and cl100k_base.
 //
 //   cargo run --release -p magi-tokenizer-bench -- bench [filter]  # throughput, all three tokenizers
 //   cargo run --release -p magi-tokenizer-bench -- startup <magi|tiktoken|bpe-openai>  # one first-call timing
@@ -6,7 +6,9 @@
 //       run under `/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux) for peak RSS
 //
 // `bench` first checks that magi-tokenizer returns tiktoken's exact token ids, counts, special-token ids and
-// decoded text for every workload; the filter matches encoding or workload names.
+// decoded text for every workload; the filter matches encoding or workload names. bpe-openai has no
+// o200k_harmony, whose ordinary encoding is o200k_base's: it is checked against tiktoken-rs but not timed, except
+// for the `special_tokens` workload, which times special-token encoding for every encoding.
 //
 // Inputs: MAGI_TOKENIZER_SOURCE lists source trees (path-list syntax, default: this repository) to cut into chunks.
 // MAGI_TOKENIZER_ASSETS names a directory with o200k_base-200k.txt and session-compacted-500.json; without it those
@@ -245,11 +247,11 @@ fn time_per_call(works: &[&dyn Fn() -> usize]) -> Vec<f64> {
         .collect()
 }
 
-/// One encoding: its magi-tokenizer functions and both reference tokenizers.
+/// One encoding: its magi-tokenizer functions and the reference tokenizers (bpe-openai lacks some encodings).
 struct Encoding {
     name: &'static str,
     tiktoken: &'static tiktoken_rs::CoreBPE,
-    bpe_openai: &'static bpe_openai::Tokenizer,
+    bpe_openai: Option<&'static bpe_openai::Tokenizer>,
     special_tokens: &'static [(&'static str, u32)],
     encode: fn(&str) -> Vec<u32>,
     count: fn(&str) -> usize,
@@ -262,13 +264,13 @@ struct Encoding {
     decode: fn(&[u32]) -> Option<String>,
 }
 
-fn encodings() -> [Encoding; 2] {
-    use magi_tokenizer::{cl100k_base, o200k_base};
+fn encodings() -> [Encoding; 3] {
+    use magi_tokenizer::{cl100k_base, o200k_base, o200k_harmony};
     [
         Encoding {
             name: "o200k",
             tiktoken: tiktoken_rs::o200k_base_singleton(),
-            bpe_openai: bpe_openai::o200k_base(),
+            bpe_openai: Some(bpe_openai::o200k_base()),
             special_tokens: &o200k_base::SPECIAL_TOKENS,
             encode: o200k_base::encode_ordinary,
             count: o200k_base::count_ordinary,
@@ -281,9 +283,24 @@ fn encodings() -> [Encoding; 2] {
             decode: o200k_base::decode,
         },
         Encoding {
+            name: "harmony",
+            tiktoken: tiktoken_rs::o200k_harmony_singleton(),
+            bpe_openai: None,
+            special_tokens: &o200k_harmony::SPECIAL_TOKENS,
+            encode: o200k_harmony::encode_ordinary,
+            count: o200k_harmony::count_ordinary,
+            encode_with_special_tokens: o200k_harmony::encode_with_special_tokens,
+            count_with_special_tokens: o200k_harmony::count_with_special_tokens,
+            encode_allowing_special: o200k_harmony::encode_allowing_special,
+            count_allowing_special: o200k_harmony::count_allowing_special,
+            encode_rejecting_special: o200k_harmony::encode,
+            count_rejecting_special: o200k_harmony::count,
+            decode: o200k_harmony::decode,
+        },
+        Encoding {
             name: "cl100k",
             tiktoken: tiktoken_rs::cl100k_base_singleton(),
-            bpe_openai: bpe_openai::cl100k_base(),
+            bpe_openai: Some(bpe_openai::cl100k_base()),
             special_tokens: &cl100k_base::SPECIAL_TOKENS,
             encode: cl100k_base::encode_ordinary,
             count: cl100k_base::count_ordinary,
@@ -337,23 +354,41 @@ fn python_disallowed_special(
     text: &str,
     allowed_special: &[&str],
 ) -> Option<DisallowedSpecialToken> {
-    encoding
-        .special_tokens
-        .iter()
-        .filter(|(name, _)| !allowed_special.contains(name))
-        .filter_map(|&(token, _)| Some(DisallowedSpecialToken { token, position: text.find(token)? }))
-        .min_by_key(|error| error.position)
+    text.match_indices("<|").find_map(|(position, _)| {
+        let rest = &text[position..];
+        let &(token, _) = encoding
+            .special_tokens
+            .iter()
+            .find(|(name, _)| rest.starts_with(name) && !allowed_special.contains(name))?;
+        Some(DisallowedSpecialToken { token, position })
+    })
 }
 
-/// Allow-lists checked against tiktoken-rs `CoreBPE::encode`: none, each token alone and all but each token.
+/// Allow-lists checked against tiktoken-rs `CoreBPE::encode`: none, each token alone and all but each token. Only
+/// the first 16 tokens and the last are varied: they cover every named token, and o200k_harmony's 1,090 would
+/// make thousands of lists.
 fn allow_lists(encoding: &Encoding) -> Vec<Vec<&'static str>> {
     let names: Vec<&'static str> = encoding.special_tokens.iter().map(|(name, _)| *name).collect();
+    let varied = names.iter().take(16).chain(names.last().filter(|_| names.len() > 16));
     let mut lists = vec![Vec::new()];
-    for name in &names {
+    for name in varied {
         lists.push(vec![*name]);
         lists.push(names.iter().copied().filter(|other| other != name).collect());
     }
     lists
+}
+
+/// Chunks of source text, each followed by a special token (striding through all of them) and the `<|` of a
+/// special-token text that is not one, so special-token lookup runs often.
+fn special_token_text(encoding: &Encoding, source: &str) -> String {
+    let tokens = encoding.special_tokens;
+    let mut text = String::new();
+    for (index, chunk) in chunks(source, 256).iter().enumerate() {
+        text.push_str(chunk);
+        text.push_str(tokens[index * 7919 % tokens.len()].0);
+        text.push_str("<|endof");
+    }
+    text
 }
 
 /// Asserts that magi-tokenizer gives tiktoken's exact ids for `texts`, ordinary and with special tokens, that counts
@@ -448,8 +483,13 @@ fn bench(filter: Option<&str>) -> Result<()> {
                 continue;
             }
             check_exact(encoding, workload, texts);
+            // Without bpe-openai the encoding is o200k_harmony, whose ordinary encoding o200k timed already.
+            let Some(bpe_openai) = encoding.bpe_openai else {
+                println!("{name:<27} exact ids for {} texts; same ordinary encoding as o200k, not timed", texts.len());
+                continue;
+            };
             let expected: usize = texts.iter().map(|text| encoding.tiktoken.encode_ordinary(text).len()).sum();
-            let bpe_count: usize = texts.iter().map(|text| encoding.bpe_openai.count(text.as_str())).sum();
+            let bpe_count: usize = texts.iter().map(|text| bpe_openai.count(text.as_str())).sum();
             assert_eq!(bpe_count, expected, "{name}: bpe-openai count differs");
             let bytes: usize = texts.iter().map(String::len).sum();
             let mib = bytes as f64 / (1 << 20) as f64;
@@ -458,9 +498,9 @@ fn bench(filter: Option<&str>) -> Result<()> {
             let times = time_per_call(&[
                 &|| sum_over(&|text| (encoding.count)(text)),
                 &|| sum_over(&|text| encoding.tiktoken.encode_ordinary(text).len()),
-                &|| sum_over(&|text| encoding.bpe_openai.count(text)),
+                &|| sum_over(&|text| bpe_openai.count(text)),
                 &|| sum_over(&|text| (encoding.encode)(text).len()),
-                &|| sum_over(&|text| encoding.bpe_openai.encode(text).len()),
+                &|| sum_over(&|text| bpe_openai.encode(text).len()),
             ]);
             // tiktoken has no count; its encode serves as both.
             let [magi_cnt, tik, bpe_cnt, magi_enc, bpe_enc] = times[..] else { unreachable!() };
@@ -477,6 +517,34 @@ fn bench(filter: Option<&str>) -> Result<()> {
                 bpe_cnt / magi_cnt,
                 tik / magi_enc,
                 bpe_enc / magi_enc,
+            );
+        }
+        // Special-token encoding, which bpe-openai does not offer: magi against tiktoken-rs only.
+        let name = format!("{}/special_tokens", encoding.name);
+        if selected(&name) {
+            let text = special_token_text(encoding, &source[..source.floor_char_boundary(256 << 10)]);
+            let expected = encoding.tiktoken.encode_with_special_tokens(&text);
+            assert_eq!((encoding.encode_with_special_tokens)(&text), expected, "{name}: ids differ");
+            assert_eq!((encoding.count_with_special_tokens)(&text), expected.len(), "{name}: count differs");
+            let mib = text.len() as f64 / (1 << 20) as f64;
+            let throughput = |micros: f64| mib / (micros / 1e6);
+            let times = time_per_call(&[
+                &|| (encoding.count_with_special_tokens)(black_box(&text)),
+                &|| encoding.tiktoken.encode_with_special_tokens(black_box(&text)).len(),
+                &|| (encoding.encode_with_special_tokens)(black_box(&text)).len(),
+            ]);
+            let [magi_cnt, tik, magi_enc] = times[..] else { unreachable!() };
+            println!(
+                "{name:<27} {mib:>9.3} | {:>7.1}MiB/s {:>7.1}MiB/s {:>11} | {:>7.1}MiB/s {:>7.1}MiB/s {:>11} | \
+                 count {:.2}x encode {:.2}x",
+                throughput(magi_cnt),
+                throughput(tik),
+                "-",
+                throughput(magi_enc),
+                throughput(tik),
+                "-",
+                tik / magi_cnt,
+                tik / magi_enc,
             );
         }
     }

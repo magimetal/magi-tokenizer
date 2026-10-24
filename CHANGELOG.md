@@ -6,6 +6,30 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
 
 ## [Unreleased]
 
+### Added
+
+- `o200k_harmony` encoding (`gpt-oss-*`) ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)): module
+  `magi_tokenizer::o200k_harmony` with the same functions as the other encodings. It reuses `o200k_base`'s scanner
+  and tables, so ordinary IDs are identical; its 1,090 special tokens (IDs 199,998–201,087, named tokens plus
+  `<|reserved_{id}|>`) match tiktoken-rs 0.12.0. Named-token constants: `START_OF_TEXT`, `END_OF_TEXT`, `RETURN`,
+  `CONSTRAIN`, `CHANNEL`, `START`, `END`, `MESSAGE`, `CALL`. Cost: 49,552 bytes in a stripped LTO release binary
+  that calls it (ARM64 macOS).
+- `bench` checks `o200k_harmony` exact IDs, counts, decoding, allow-lists and disallowed-special errors against
+  tiktoken-rs on every workload. bpe-openai has no Harmony tokenizer, so Harmony's ordinary workloads are checked,
+  not timed. A new `special_tokens` workload times special-token encoding against tiktoken-rs for all encodings.
+
+### Changed
+
+- Special-token lookup takes the text from `<|` to the next `|>` as the only candidate and binary-searches it for
+  long lists (`o200k_harmony`), instead of comparing every token at each `<|`. `token_bytes` finds special IDs by
+  binary search. Compile-time assertions check that each `SPECIAL_TOKENS` list is sorted by ID and that every
+  token is `<|`…`|>` with no inner `|>`. Short lists (`o200k_base`, `cl100k_base`) keep the direct comparison.
+  Old and new builds run alternately on one fixed corpus (ARM64 macOS, background load): ordinary throughput is
+  unchanged within noise (cl100k source count 295/241/285 → 300/253/288 MiB/s for 1 MiB/48 B/256 B chunks). The new
+  `special_tokens` workload measured o200k 271 → 268 MiB/s and cl100k 274 → 271 MiB/s (median of 3), about 1% lower
+  and within the 27 MiB/s spread between runs. `o200k_harmony` special-token encoding runs at about 240 MiB/s,
+  about 10× tiktoken-rs.
+
 ### Changed
 
 - README documents the compatibility policy ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)),

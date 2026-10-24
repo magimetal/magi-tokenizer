@@ -4,8 +4,9 @@ A fast Rust tokenizer for OpenAI's `o200k_base` and (optional feature) `cl100k_b
 same token IDs as [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary`, `encode_with_special_tokens`
 and `encode` with an allow-list of special tokens.
 
-Experimental, version 0.0.2. No automated correctness suite is included. See
-[Known limitations](#known-limitations) and [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues).
+Experimental, version 0.0.2. From 0.1.0, releases follow the [compatibility policy](#compatibility). No automated
+correctness suite is included. See [Known limitations](#known-limitations) and
+[GitHub issues](https://github.com/magimetal/magi-tokenizer/issues).
 
 ## Quick start
 
@@ -63,10 +64,10 @@ assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
 
 ## Using it in your project
 
-- Pin an exact version and commit `Cargo.lock`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). There is no
-  compatibility promise, and the API can change between releases. For git dependencies, pin a full commit hash
-  whose CI passed. Do not enable `harness`:
-  it exposes memory-benchmark hooks for `bench/`, not a stable API.
+- Pin 0.0.x releases exactly (`=0.0.2`) and commit `Cargo.lock`: they have no compatibility promise. From 0.1.0,
+  the [compatibility policy](#compatibility) applies. Changes are listed in [CHANGELOG.md](CHANGELOG.md). For git
+  dependencies, pin a full commit hash whose CI passed. Do not enable `harness`: it exposes memory-benchmark hooks
+  for `bench/` and is outside the policy.
 - Special-token modes ([#10](https://github.com/magimetal/magi-tokenizer/issues/10)):
   - `encode_ordinary` matches tiktoken's `encode_ordinary`: special-token text is ordinary text.
   - `encode_with_special_tokens` matches `encode(text, allowed_special="all")`.
@@ -93,20 +94,49 @@ assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
   size unchanged, since unused tables are dropped at link time. Clean release builds of that program took 3.6 s
   without the feature and 4.5 s with it (median of three, Apple M5 Pro).
 
+### Compatibility
+
+Decision ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)): the policy starts with 0.1.0, the next
+release. 0.0.1 and 0.0.2 carry no promise. From 0.1.0, versions follow Cargo's SemVer rules: a release that breaks
+a promise below gets a new minor version (0.1 → 0.2), which Cargo treats as incompatible; a patch release
+(0.1.0 → 0.1.1) keeps every promise. A plain `magi-tokenizer = "0.1"` requirement then takes only compatible releases.
+
+Kept within a minor version:
+
+- Token IDs. For any `&str` input, each encoding returns the same IDs as tiktoken-rs 0.12.0 with its bundled
+  vocabularies and Unicode 16 data; the `encode` and `count` error follows Python tiktoken's disallowed-special check.
+  Counts equal encode lengths, `pieces` follows the reference split pattern, and `decode` and `token_bytes` return
+  vocabulary bytes. A newer reference, Unicode version or vocabulary would move token boundaries, so it needs a new
+  minor version. A difference from the reference is a bug: its fix ships in a patch release and is listed under
+  "Fixed" in the changelog, because it changes IDs for the affected inputs.
+- API. Public items of `magi_tokenizer`, `magi_tokenizer::o200k_base` and `magi_tokenizer::cl100k_base`, the
+  crate-root re-export of `o200k_base`, and the `cl100k_base` feature are not removed, renamed or changed
+  incompatibly. Additions (functions, constants, encodings, features) can ship in patch releases.
+- Minimum Rust version 1.88. Raising it needs a new minor version.
+
+Not promised:
+
+- The `harness` feature and `magi_tokenizer::harness` (hidden from docs) can change or disappear in any release.
+  Cargo cannot hide a feature, so the exclusion is by documentation: do not enable it.
+- Speed, memory use, binary size and build time can change in any release. The changelog records notable changes.
+
+Release notes: [CHANGELOG.md](CHANGELOG.md) is the record and lists breaking changes under "Breaking". Each GitHub
+release repeats its version's changelog section.
+
 ### Model routing
 
 Decision ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)): this library does not map model names to
 encodings and does not plan to. Keep the mapping in your application, and pick the encoding module from it:
 
-- New models ship more often than this crate. A built-in mapping would lag, and pinning an exact version (as
-  recommended above) would freeze it.
+- New models ship more often than this crate. A built-in mapping would lag, and users stay on one minor version
+  until they upgrade.
 - There is no single source of truth. Upstream tiktoken does not list `gpt-6-*`, which magi-code routes to
   `o200k_base`. The application that knows which models it calls is the right owner.
 - Results would be incomplete: `cl100k_base` can be compiled out, `gpt-oss-*` uses `o200k_harmony`, whose
   special tokens are not implemented ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)), and the
   legacy 50k encodings are missing ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)).
-- A mapping would be API surface whose behavior changes with every update, before any compatibility policy exists
-  ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)).
+- A mapping would be API surface whose behavior changes with every update. Changing a name's encoding changes its
+  token counts, which the [compatibility policy](#compatibility) allows only in a new minor version.
 
 A wrong encoding gives wrong counts without any error. Treat unknown model names as an error, or choose a default
 deliberately; do not fall back silently. The [Scope](#scope) table lists the upstream mappings to start from.

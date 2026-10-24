@@ -21,6 +21,12 @@ There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-t
 
 ### Added
 
+- Special-token allow-lists and error mode for both encodings
+  ([#10](https://github.com/magimetal/magi-tokenizer/issues/10)): `encode_allowing_special` and
+  `count_allowing_special` match tiktoken-rs 0.12.0 `CoreBPE::encode(text, allowed_special)`. `encode` and `count`
+  follow Python tiktoken's default `encode()`: special-token text not in the allow-list returns
+  `Err(DisallowedSpecialToken)` with the leftmost token and its byte offset. `bench` checks both against the
+  references before timing.
 - `cl100k_base` encoding behind the `cl100k_base` feature ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)):
   module `magi_tokenizer::cl100k_base` with the same functions and constants as `o200k_base`, a second hand-written
   scanner for its regex, and its own build-time tables. Programs that call it grow by about 10 MB (fat-LTO release,

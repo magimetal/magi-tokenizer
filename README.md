@@ -270,8 +270,9 @@ Encode was 3.02 to 6.49× faster than tiktoken-rs and 1.25 to 3.63× faster than
 Source results differ when using this repository instead of `toks`.
 
 `cl100k_base` count throughput in MiB/s, Rust 1.98.1, this repository's source (`git archive` of `5ac7c1e`), no
-private assets. Back-to-back runs of the pre-change bench and this one put `o200k_base` count and encode within 2%
-of the pre-change library on every shared workload.
+private assets. Over six alternating runs of the pre-change and changed benches, median `o200k_base` throughput
+moved −1.6% to +1.1% per workload (paired runs −3.0% to +1.9%). Source and multilingual workloads were 0.5–1.6%
+slower in the median, smaller than the roughly 10% run-to-run variation noted under [Caveats](#caveats).
 
 | Workload | MiB | magi-tokenizer | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

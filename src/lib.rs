@@ -45,7 +45,7 @@ macro_rules! encoding_api {
         }
 
         /// Number of tokens `encode_ordinary(text)` returns, without building the token list. Working memory per
-        /// piece is bounded, except when a long piece falls back to the whole-piece heap merge.
+        /// piece is bounded, except when a long piece falls back to the whole-piece merge (20 bytes per piece byte).
         pub fn count_ordinary(text: &str) -> usize {
             crate::count_scanned::<$scanner, $vocabulary>(text)
         }

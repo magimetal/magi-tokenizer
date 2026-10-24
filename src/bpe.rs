@@ -5,8 +5,6 @@
 use crate::tables::{
     NO_MERGE, Vocabulary, byte_merge_rank, merge_rank, ordinary_token_bytes, premerged_char, token_id_for_bytes,
 };
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 
 /// Pieces up to this length merge in stack arrays with linear minimum search. Every token is at most this long.
 const SHORT_PIECE_BYTES: usize = 128;
@@ -404,7 +402,7 @@ fn merge_linked<V: Vocabulary>(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTE
 }
 
 /// Index of a part in `merge_long_piece`: u32 halves link memory, usize handles pieces of 4 GiB and more.
-trait PartIndex: Copy + Ord {
+trait PartIndex: Copy + PartialEq {
     const NONE: Self;
     fn from_index(index: usize) -> Self;
     fn index(self) -> usize;
@@ -430,7 +428,8 @@ impl PartIndex for usize {
     }
 }
 
-/// Heap-driven merge for long pieces, O(n log n). Emits tokens in order.
+/// Merge for long pieces, O(n log n), in memory allocated once: five u32 arrays as long as the piece (u32 indices),
+/// or two u32 and three usize arrays for pieces of 4 GiB and more. Emits tokens in order.
 fn merge_long_piece<V: Vocabulary>(piece: &[u8], emit: impl FnMut(u32)) {
     if piece.len() < u32::MAX as usize {
         merge_parts::<V, u32>(piece, emit);
@@ -444,13 +443,12 @@ fn merge_parts<V: Vocabulary, I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u
     if len == 0 {
         return;
     }
-    // Parts are identified by their first byte index. `next`/`prev` link live parts; `rank[i]` is the current
-    // merge rank of part i with its successor, which invalidates stale heap entries.
+    // Parts are identified by their first byte index. `next`/`prev` link live parts; `rank[i]` is the rank of
+    // merging part i with its successor, NO_MERGE for the last part and for bytes that start no part.
     let mut tokens = vec![0u32; len];
     let mut next = vec![I::NONE; len];
     let mut prev = vec![I::NONE; len];
     let mut rank = vec![NO_MERGE; len];
-    let mut heap = BinaryHeap::with_capacity(len);
     let mut previous: Option<StartingPart> = None;
     for part in starting_parts::<V>(piece) {
         tokens[part.start] = part.token;
@@ -458,16 +456,15 @@ fn merge_parts<V: Vocabulary, I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u
             next[left.start] = I::from_index(part.start);
             prev[part.start] = I::from_index(left.start);
             rank[left.start] = starting_merge_rank::<V>(piece, left, part);
-            if rank[left.start] != NO_MERGE {
-                heap.push(Reverse((rank[left.start], I::from_index(left.start))));
-            }
         }
         previous = Some(part);
     }
-    while let Some(Reverse((merge, start))) = heap.pop() {
-        let start = start.index();
-        if rank[start] != merge {
-            continue;
+    let mut lowest = LowestRankTree::<I>::new(&rank);
+    loop {
+        let start = lowest.lowest_part();
+        let merge = rank[start];
+        if merge == NO_MERGE {
+            break;
         }
         let right = next[start].index();
         tokens[start] = merge;
@@ -477,17 +474,14 @@ fn merge_parts<V: Vocabulary, I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u
             prev[after.index()] = I::from_index(start);
         }
         rank[right] = NO_MERGE;
+        lowest.update(&rank, right);
         rank[start] = if after != I::NONE { merge_rank::<V>(merge, tokens[after.index()]) } else { NO_MERGE };
-        if rank[start] != NO_MERGE {
-            heap.push(Reverse((rank[start], I::from_index(start))));
-        }
+        lowest.update(&rank, start);
         let before = prev[start];
         if before != I::NONE {
             let before = before.index();
             rank[before] = merge_rank::<V>(tokens[before], merge);
-            if rank[before] != NO_MERGE {
-                heap.push(Reverse((rank[before], I::from_index(before))));
-            }
+            lowest.update(&rank, before);
         }
     }
     let mut part = 0;
@@ -498,5 +492,47 @@ fn merge_parts<V: Vocabulary, I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u
             return;
         }
         part = following.index();
+    }
+}
+
+/// Tournament tree over the parts of `merge_parts`, giving the part with the lowest merge rank, leftmost among
+/// equal ranks. Leaf i (node len + i) is part i and is not stored; each of nodes 1..len holds the winner of its two
+/// children. Every node above 1 has one parent, so node 1 holds the overall winner. Its fixed size, unlike a heap
+/// of stale entries, keeps the merge's memory exact.
+struct LowestRankTree<I> {
+    nodes: Vec<I>,
+}
+
+impl<I: PartIndex> LowestRankTree<I> {
+    fn new(rank: &[u32]) -> Self {
+        let mut tree = Self { nodes: vec![I::NONE; rank.len()] };
+        for node in (1..rank.len()).rev() {
+            tree.nodes[node] = I::from_index(tree.winner_below(rank, node));
+        }
+        tree
+    }
+
+    /// The part with the lowest rank; its rank is NO_MERGE when no merge is left.
+    fn lowest_part(&self) -> usize {
+        if self.nodes.len() > 1 { self.nodes[1].index() } else { 0 }
+    }
+
+    /// Replays the matches above `part` after its rank changed.
+    fn update(&mut self, rank: &[u32], part: usize) {
+        let mut node = (rank.len() + part) / 2;
+        while node > 0 {
+            self.nodes[node] = I::from_index(self.winner_below(rank, node));
+            node /= 2;
+        }
+    }
+
+    fn winner_below(&self, rank: &[u32], node: usize) -> usize {
+        let left = self.part_at(rank.len(), 2 * node);
+        let right = self.part_at(rank.len(), 2 * node + 1);
+        if (rank[left], left) <= (rank[right], right) { left } else { right }
+    }
+
+    fn part_at(&self, len: usize, node: usize) -> usize {
+        if node >= len { node - len } else { self.nodes[node].index() }
     }
 }

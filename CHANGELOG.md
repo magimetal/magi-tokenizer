@@ -10,6 +10,11 @@ There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-t
 - The magi-code pilot plan moved to `docs/archive/magi-code-pilot.md` and is no longer maintained. Remaining gaps are
   tracked in issues #8–#17. The README published with 0.0.2 still links to the old path.
 - Added this changelog, backfilled from git history.
+- Whole-piece fallback has a fixed memory bound ([#12](https://github.com/magimetal/magi-tokenizer/issues/12)): a
+  tournament tree replaces the binary heap, so the merge allocates exactly 20 bytes of working memory per piece byte
+  (32 at 4 GiB and above), once, in O(n log n) time. Peak RSS on a forced 64 MiB fallback fell from 1,750 MB to
+  1,414 MB and time from 13.6 s to 11.8 s; window timings are unchanged. Token IDs are unchanged: `bench` exact-ID
+  checks pass for both encodings, including `forced_fallback`. There is still no memory-limit setting.
 
 - Short-piece speedups for both encodings ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)): one- and
   two-byte pieces skip the vocabulary hash table, merges of pieces under 32 bytes shift parts with a loop instead

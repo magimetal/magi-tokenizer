@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 static FALLBACK_PIECES: AtomicUsize = AtomicUsize::new(0);
 static FAIL_WINDOW_MERGE_AFTER_STITCHES: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-/// Pieces that fell back to the whole-piece heap merge since the last reset, in encode or count.
+/// Pieces that fell back to the whole-piece merge since the last reset, in encode or count.
 pub fn fallback_pieces() -> usize {
     FALLBACK_PIECES.load(Relaxed)
 }

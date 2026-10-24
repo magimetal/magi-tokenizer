@@ -80,8 +80,10 @@ assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
 - For counts without a token list, use `count_ordinary`, `count_with_special_tokens`, `count_allowing_special` or
   `count`. They match the encode functions' lengths, and `count` returns the same error as `encode`.
 - Cap untrusted input before calling the library. Encoding allocates 4 bytes per output token. The whole-piece
-  heap fallback uses memory proportional to piece length: 26 to 27 bytes per piece byte in measured runs, not a
-  proven bound. No tested input reaches it naturally, but none is known to rule it out. There is no memory-limit setting.
+  fallback allocates exactly 20 bytes of working memory per piece byte, once, and runs in O(n log n) time
+  ([#12](https://github.com/magimetal/magi-tokenizer/issues/12)); measured runs used 21 to 22 bytes of peak memory
+  per piece byte, input included. No tested input reaches it naturally, but none is known to rule it out. There is
+  no memory-limit setting: an input cap of N bytes bounds fallback working memory at 20 × N bytes.
 - Embedded `o200k_base` tables add about 19 MiB. A release program counting one string was 19.9 MB, versus 0.5 MB empty and
   35.1 MB with bpe-openai (ARM64 macOS). Clean debug and release builds each took about 1.3 s on an Apple M5 Pro.
   Dependents use their own build profiles, not this repository's. If debug table generation is slow, add
@@ -158,7 +160,7 @@ Constants: `END_OF_TEXT`, `END_OF_PROMPT`, `SPECIAL_TOKENS`, `ORDINARY_TOKEN_COU
 Functions do not panic or loop forever on any `&str` or `u32` token ID, except for these resource limits:
 
 - Out of memory aborts the process and cannot be caught with `catch_unwind`. Encoding allocates by token count,
-  and the whole-piece heap fallback allocates by piece length.
+  and the whole-piece fallback allocates 20 bytes per piece byte.
 - On 32-bit targets, inputs or pieces of several hundred MiB can request buffers larger than `isize::MAX`, which
   panics. On 64-bit targets, allocation fails first.
 
@@ -181,7 +183,7 @@ These three implementations compute them differently:
 
 On source code, transcripts and the shared fixture, magi-tokenizer is about 6× faster than tiktoken-rs and 3×
 faster than bpe-openai. Cached windows make long runs about 64× and 5.6× faster, respectively. Counting avoids
-storing output tokens. These results exclude the whole-piece heap fallback.
+storing output tokens. These results exclude the whole-piece fallback.
 
 It supports fewer encodings than either competitor: no Harmony special tokens and no legacy 50k encodings.
 All measurements come from one machine under background load (see [Caveats](#caveats)).
@@ -257,7 +259,7 @@ the check. Random CJK and Hangul pieces need about a third of the parts.
 
 #### Long pieces: overlapping windows
 
-A heap merge costs O(n log n) per piece and is slow on repetitive runs such as 300,000 spaces, `aaaa…` or `ababab…`.
+Merging a whole piece costs O(n log n) and is slow on repetitive runs such as 300,000 spaces, `aaaa…` or `ababab…`.
 Instead, magi-tokenizer encodes short windows and joins them using a property from the
 [`bpe` crate README](https://github.com/github/rust-gems/tree/main/crates/bpe), under "Properties of BPE":
 
@@ -271,7 +273,7 @@ cache, boundary alignment, streaming finalization, packed-key merge and all-spli
 2. Start the next window at an existing token boundary, overlapping about 1/8 of the window size. Encode it exactly.
 3. Find the first matching token ID and end offset in both encodings. A single merge-style pass over sorted offsets finds this stitch point.
 4. Keep the existing result through that token and append the window's remaining tokens.
-5. Without a stitch point, double the window and retry, up to 4,096 bytes. If that fails, encode the whole piece with the exact heap merge.
+5. Without a stitch point, double the window and retry, up to 4,096 bytes. If that fails, merge the whole piece at once (whole-piece fallback).
 6. After a successful stitch, reset to 128 bytes. Difficult stretches are usually local, and each window costs a few microseconds without special data structures.
 
 A 16-slot cache reuses window encodings within each call. Hash hits require full byte comparison, so collisions
@@ -284,20 +286,27 @@ Windows reach back at most 640 bytes (maximum overlap plus one token). Tokens en
 Every 4,096 pending tokens, the encoder appends final tokens to output and the counter only counts them.
 Working memory stays bounded regardless of piece length: at most 64 KiB of cached bytes, plus a few hundred KiB
 of merge state and pending tokens, usually a few KiB. These are data-structure estimates, excluding allocator overhead.
-The exception is whole-piece fallback, which discards that piece's prior output and uses memory proportional to its length.
+The exception is whole-piece fallback, which discards that piece's prior output and allocates by its length.
+
+The whole-piece merge allocates five `u32` arrays as long as the piece, once: tokens, both links, ranks and a
+tournament tree that picks the lowest rank, leftmost on ties. That is exactly 20 bytes of working memory per piece
+byte, independent of content. Each merge updates at most three tree paths, so time is O(n log n). Before
+[#12](https://github.com/magimetal/magi-tokenizer/issues/12), a binary heap kept stale entries and peak memory
+depended on content.
 
 Peak RSS for one random `a`/`b` piece (`magi-tokenizer-bench memory`, ARM64 macOS, fallback forced through `harness`):
 
 | Piece | `count` via windows | `count` via fallback | `encode` via windows | `encode` via fallback |
 | ---: | ---: | ---: | ---: | ---: |
-| 16 MiB | 29 MiB, 0.3 s | 421 MiB, 3.3 s | 51 MiB, 0.3 s | 436 MiB, 3.1 s |
-| 64 MiB | 77 MiB, 1.1 s | 1,669 MiB, 16.7 s | 164 MiB, 1.1 s | 1,732 MiB, 17.1 s |
-| 256 MiB | 269 MiB, 4.5 s | 6,661 MiB, 88.6 s | 619 MiB, 4.4 s | 6,917 MiB, 85.5 s |
+| 16 MiB | 29 MiB, 0.3 s | 341 MiB, 2.6 s | 51 MiB, 0.3 s | 357 MiB, 2.6 s |
+| 64 MiB | 77 MiB, 1.1 s | 1,349 MiB, 11.8 s | 165 MiB, 1.1 s | 1,413 MiB, 12.1 s |
+| 256 MiB | 269 MiB, 4.2 s | 5,381 MiB, 55.4 s | 619 MiB, 4.3 s | 5,637 MiB, 56.6 s |
 
-RSS includes input at 1 byte per piece byte. Fallback used 26 to 27 bytes per piece byte and took 11 to 20 times
-as long as windows, with a growing gap at larger sizes. These are measurements, not worst-case bounds.
+RSS includes input at 1 byte per piece byte; `encode` adds its output at 4 bytes per token. Fallback peaks were 21
+to 22 bytes per piece byte, against 26 to 27 with the heap, and took 9 to 13 times as long as windows.
 
-The heap merge also handles windows over 128 bytes. It uses `u32` positions, switching to `usize` at 4 GiB.
+The whole-piece merge also handles windows over 128 bytes. It uses `u32` positions, switching to `usize` at 4 GiB,
+where the two link arrays and the tree use 8-byte entries: 32 bytes per piece byte.
 
 ## Benchmarks
 
@@ -406,7 +415,7 @@ build.rs                     parses each enabled vocabulary, emits binary tables
 src/lib.rs                   public API: one module per encoding with pieces, encode/count, decode
 src/scanner.rs               hand-written o200k and cl100k pretokenizers
 src/unicode_classes.rs       generated per-code-point class table (do not edit by hand)
-src/bpe.rs                   short-piece, window and heap byte-pair merging
+src/bpe.rs                   short-piece, window and whole-piece byte-pair merging
 src/tables.rs                table lookups: vocabulary, pair ranks, byte ranks, token bytes
 src/table_hash.rs            hash functions and table geometry shared with build.rs
 bench/                       magi-tokenizer-bench: throughput, startup and memory benchmarks
@@ -446,8 +455,8 @@ The release profile uses fat LTO and one codegen unit. Build scripts use `opt-le
 
 - Random CJK pieces made mostly of characters not eligible to start whole (for example `你`, `世`) still merge
   from bytes: about level with bpe-openai, not faster.
-- If no stitch point exists within 4,096 bytes, whole-piece fallback can use much more time and memory
-  (see [measured fallback costs](#how-it-works)). No input is known to rule it out. Measured costs are not proven bounds.
+- If no stitch point exists within 4,096 bytes, whole-piece fallback takes 20 bytes of working memory per piece
+  byte and about 10 times as long as windows (see [fallback costs](#how-it-works)). No input is known to rule it out.
 - `o200k_harmony` special tokens ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)) and the legacy
   `r50k_base`, `p50k_base` and `p50k_edit` encodings ([#19](https://github.com/magimetal/magi-tokenizer/issues/19))
   are not implemented. Model-name routing is left to applications by design ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)).

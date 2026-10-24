@@ -1,5 +1,5 @@
-// Hand-written matcher for the o200k_base pretokenization regex. It returns the same pieces as tiktoken's
-// fancy-regex search, alternative by alternative:
+// Hand-written matchers for the pretokenization regexes of each encoding. They return the same pieces as
+// tiktoken's fancy-regex search, alternative by alternative. o200k_base:
 //
 //   [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
 // | [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
@@ -9,11 +9,48 @@
 // | \s+(?!\S)
 // | \s+
 //
+// cl100k_base:
+//
+//   '(?i:[sdmt]|ll|ve|re)
+// | [^\r\n\p{L}\p{N}]?+\p{L}++
+// | \p{N}{1,3}+
+// |  ?[^\s\p{L}\p{N}]++[\r\n]*+
+// | \s++$
+// | \s*[\r\n]
+// | \s+(?!\S)
+// | \s
+//
 // Matching order and backtracking follow the scanner design of toks (Apache-2.0, Copyright 2026 Actual
 // Computer Inc.), src/core/k3_o200k_c.c and src/core/kernels.h, rewritten in Rust for magi-tokenizer.
 // Atoms are Unicode scalars; input is valid UTF-8 because callers pass `&str`.
 
 use crate::unicode_classes::{ASCII_CLASSES, BLOCK_CLASSES, BLOCK_INDEX};
+use std::marker::PhantomData;
+
+/// A pretokenizer: where the piece starting at `pos` ends (`pos < text.len()`).
+pub(crate) trait Scanner {
+    fn piece_end(text: &[u8], pos: usize) -> usize;
+}
+
+pub(crate) struct O200kScanner;
+
+impl Scanner for O200kScanner {
+    #[inline(always)]
+    fn piece_end(text: &[u8], pos: usize) -> usize {
+        o200k_piece_end(text, pos)
+    }
+}
+
+#[cfg(feature = "cl100k_base")]
+pub(crate) struct Cl100kScanner;
+
+#[cfg(feature = "cl100k_base")]
+impl Scanner for Cl100kScanner {
+    #[inline(always)]
+    fn piece_end(text: &[u8], pos: usize) -> usize {
+        cl100k_piece_end(text, pos)
+    }
+}
 
 const BASE_MASK: u8 = 0x07;
 const PUNCTUATION: u8 = 0;
@@ -166,9 +203,26 @@ fn whitespace_end(text: &[u8], pos: usize) -> usize {
 }
 const NEWLINE: u8 = 4;
 
-/// End of the piece that starts at `pos` (`pos < text.len()`).
+/// End of `\p{N}{1,3}` whose first atom ends at `second`.
 #[inline(always)]
-pub(crate) fn piece_end(text: &[u8], pos: usize) -> usize {
+fn number_piece_end(text: &[u8], second: usize) -> usize {
+    let mut end = second;
+    for _ in 0..2 {
+        if end >= text.len() {
+            break;
+        }
+        let (class, len) = class_at(text, end);
+        if class & BASE_MASK != NUMBER {
+            break;
+        }
+        end += len;
+    }
+    end
+}
+
+/// End of the o200k_base piece that starts at `pos` (`pos < text.len()`).
+#[inline(always)]
+fn o200k_piece_end(text: &[u8], pos: usize) -> usize {
     let (class, scalar, first_len) = atom_at(text, pos);
     let second = pos + first_len;
     let end = match class & BASE_MASK {
@@ -176,20 +230,7 @@ pub(crate) fn piece_end(text: &[u8], pos: usize) -> usize {
             let (first_alternative, second_alternative) = letter_alternatives_end(text, pos, class, first_len);
             first_alternative.max(second_alternative)
         }
-        NUMBER => {
-            let mut end = second;
-            for _ in 0..2 {
-                if end >= text.len() {
-                    break;
-                }
-                let (class, len) = class_at(text, end);
-                if class & BASE_MASK != NUMBER {
-                    break;
-                }
-                end += len;
-            }
-            end
-        }
+        NUMBER => number_piece_end(text, second),
         base @ (PUNCTUATION | SPACE) => prefixed_piece_end(text, pos, base, class, scalar, second),
         _ => whitespace_end(text, pos),
     };
@@ -233,16 +274,89 @@ fn prefixed_piece_end(text: &[u8], pos: usize, base: u8, class: u8, scalar: u32,
     end
 }
 
-/// Iterator over pretokenized pieces of a string.
+/// End of the run of `[\r\n]` atoms starting at `end`.
+#[cfg(feature = "cl100k_base")]
+#[inline(always)]
+fn newline_run_end(text: &[u8], mut end: usize) -> usize {
+    while end < text.len() && matches!(text[end], b'\r' | b'\n') {
+        end += 1;
+    }
+    end
+}
+
+/// End of the cl100k_base piece that starts at `pos` (`pos < text.len()`).
+#[cfg(feature = "cl100k_base")]
+#[inline(always)]
+fn cl100k_piece_end(text: &[u8], pos: usize) -> usize {
+    let (class, scalar, first_len) = atom_at(text, pos);
+    let second = pos + first_len;
+    let base = class & BASE_MASK;
+    let end = match base {
+        LETTER => base_run_end(text, second, LETTER),
+        NUMBER => number_piece_end(text, second),
+        PUNCTUATION | SPACE => {
+            // `'(?i:[sdmt]|ll|ve|re)` is the same suffix set as o200k_base's contractions.
+            let contraction = contraction_end(text, pos);
+            if contraction > pos {
+                return contraction;
+            }
+            let (second_class, second_len) = if second < text.len() { class_at(text, second) } else { (0xFF, 0) };
+            // `[^\r\n\p{L}\p{N}]?+\p{L}++`: the optional atom is taken whenever it can be, so letters must follow it.
+            if second_class & BASE_MASK == LETTER {
+                base_run_end(text, second + second_len, LETTER)
+            } else if base == PUNCTUATION {
+                newline_run_end(text, base_run_end(text, second, PUNCTUATION))
+            } else if scalar == 0x20 && second_class & BASE_MASK == PUNCTUATION {
+                newline_run_end(text, base_run_end(text, second + second_len, PUNCTUATION))
+            } else {
+                cl100k_whitespace_end(text, pos)
+            }
+        }
+        _ => cl100k_whitespace_end(text, pos),
+    };
+    // Every alternative above ends past `pos`; the guard keeps the scan loop finite regardless.
+    if end > pos { end } else { second }
+}
+
+/// `\s++$|\s*[\r\n]|\s+(?!\S)|\s` at `pos`.
+#[cfg(feature = "cl100k_base")]
+#[inline(always)]
+fn cl100k_whitespace_end(text: &[u8], pos: usize) -> usize {
+    let mut end = pos;
+    let mut last_newline_end = 0;
+    let mut last_start = pos;
+    while end < text.len() {
+        let (class, len) = class_at(text, end);
+        match class & BASE_MASK {
+            SPACE => {}
+            NEWLINE => last_newline_end = end + len,
+            _ => break,
+        }
+        last_start = end;
+        end += len;
+    }
+    if end == text.len() {
+        end
+    } else if last_newline_end != 0 {
+        last_newline_end
+    } else if last_start == pos {
+        end
+    } else {
+        last_start
+    }
+}
+
+/// Iterator over pretokenized pieces of a string, for the encoding that produced it.
 #[derive(Clone, Debug)]
 pub struct Pieces<'a> {
     text: &'a str,
     pos: usize,
+    piece_end: fn(&[u8], usize) -> usize,
 }
 
 impl<'a> Pieces<'a> {
-    pub(crate) fn new(text: &'a str) -> Self {
-        Self { text, pos: 0 }
+    pub(crate) fn new<S: Scanner>(text: &'a str) -> Self {
+        Self { text, pos: 0, piece_end: S::piece_end }
     }
 }
 
@@ -255,10 +369,38 @@ impl<'a> Iterator for Pieces<'a> {
             return None;
         }
         let start = self.pos;
-        self.pos = piece_end(self.text.as_bytes(), start);
+        self.pos = (self.piece_end)(self.text.as_bytes(), start);
         // Piece boundaries are scalar boundaries, so the slice is valid UTF-8.
         Some(&self.text[start..self.pos])
     }
 }
 
 impl core::iter::FusedIterator for Pieces<'_> {}
+
+/// `Pieces` with the scanner fixed at compile time, for the encoding loops. Yields bytes: piece ends are character
+/// boundaries, so the `str` slicing checks are skipped.
+pub(crate) struct ScannedPieces<'a, S> {
+    text: &'a [u8],
+    pos: usize,
+    scanner: PhantomData<S>,
+}
+
+impl<'a, S: Scanner> ScannedPieces<'a, S> {
+    pub(crate) fn new(text: &'a str) -> Self {
+        Self { text: text.as_bytes(), pos: 0, scanner: PhantomData }
+    }
+}
+
+impl<'a, S: Scanner> Iterator for ScannedPieces<'a, S> {
+    type Item = &'a [u8];
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a [u8]> {
+        if self.pos >= self.text.len() {
+            return None;
+        }
+        let start = self.pos;
+        self.pos = S::piece_end(self.text, start);
+        Some(&self.text[start..self.pos])
+    }
+}

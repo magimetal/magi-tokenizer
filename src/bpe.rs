@@ -3,7 +3,7 @@
 // concatenated bytes" equals the pair table's merged id for (left token, right token).
 
 use crate::tables::{
-    BYTE_TOKENS, NO_MERGE, byte_merge_rank, merge_rank, ordinary_token_bytes, premerged_char, token_id_for_bytes,
+    NO_MERGE, Vocabulary, byte_merge_rank, merge_rank, ordinary_token_bytes, premerged_char, token_id_for_bytes,
 };
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -29,51 +29,51 @@ const _: () = {
 
 /// Appends the tokens of `piece` to `out`.
 #[inline]
-pub(crate) fn encode_piece(piece: &[u8], out: &mut Vec<u32>) {
+pub(crate) fn encode_piece<V: Vocabulary>(piece: &[u8], out: &mut Vec<u32>) {
     if piece.len() <= SHORT_PIECE_BYTES {
-        encode_short_piece(piece, out);
+        encode_short_piece::<V>(piece, out);
     } else {
-        encode_long_piece(piece, out);
+        encode_long_piece::<V>(piece, out);
     }
 }
 
 /// Number of tokens `piece` encodes to. Long pieces are counted in bounded memory unless the whole-piece fallback runs.
 #[inline]
-pub(crate) fn count_piece(piece: &[u8]) -> usize {
+pub(crate) fn count_piece<V: Vocabulary>(piece: &[u8]) -> usize {
     if piece.len() > SHORT_PIECE_BYTES {
         let mut count = 0;
-        if !merge_in_windows(piece, |tokens| count += tokens.len()) {
+        if !merge_in_windows::<V>(piece, |tokens| count += tokens.len()) {
             #[cfg(feature = "harness")]
             crate::harness::record_fallback();
             count = 0;
-            merge_long_piece(piece, |_| count += 1);
+            merge_long_piece::<V>(piece, |_| count += 1);
         }
         count
-    } else if token_id_for_bytes(piece).is_some() {
+    } else if token_id_for_bytes::<V>(piece).is_some() {
         1
     } else {
-        merge_short_piece(piece, &mut [0u32; SHORT_PIECE_BYTES])
+        merge_short_piece::<V>(piece, &mut [0u32; SHORT_PIECE_BYTES])
     }
 }
 
 #[inline]
-fn encode_short_piece(piece: &[u8], out: &mut Vec<u32>) {
-    if let Some(id) = token_id_for_bytes(piece) {
+fn encode_short_piece<V: Vocabulary>(piece: &[u8], out: &mut Vec<u32>) {
+    if let Some(id) = token_id_for_bytes::<V>(piece) {
         out.push(id);
     } else {
         let mut tokens = [0u32; SHORT_PIECE_BYTES];
-        let count = merge_short_piece(piece, &mut tokens);
+        let count = merge_short_piece::<V>(piece, &mut tokens);
         out.extend_from_slice(&tokens[..count]);
     }
 }
 
-fn encode_long_piece(piece: &[u8], out: &mut Vec<u32>) {
+fn encode_long_piece<V: Vocabulary>(piece: &[u8], out: &mut Vec<u32>) {
     let base = out.len();
-    if !merge_in_windows(piece, |tokens| out.extend_from_slice(tokens)) {
+    if !merge_in_windows::<V>(piece, |tokens| out.extend_from_slice(tokens)) {
         #[cfg(feature = "harness")]
         crate::harness::record_fallback();
         out.truncate(base);
-        merge_long_piece(piece, |id| out.push(id));
+        merge_long_piece::<V>(piece, |id| out.push(id));
     }
 }
 
@@ -92,7 +92,7 @@ const COMMIT_BATCH_TOKENS: usize = 4096;
 ///
 /// Returns false when a stretch has no stitch point within MAX_WINDOW_BYTES. A prefix may already have been
 /// committed; the caller discards it and merges the whole piece instead.
-pub(crate) fn merge_in_windows(piece: &[u8], mut commit: impl FnMut(&[u32])) -> bool {
+pub(crate) fn merge_in_windows<V: Vocabulary>(piece: &[u8], mut commit: impl FnMut(&[u32])) -> bool {
     // Tokens not yet committed, with the end offset in `piece` of each. Only the stretch after a window's start is
     // ever replaced, and windows start at or after `committed_end`.
     let mut tokens: Vec<u32> = Vec::new();
@@ -123,7 +123,7 @@ pub(crate) fn merge_in_windows(piece: &[u8], mut commit: impl FnMut(&[u32])) -> 
         let bytes = &piece[window.clone()];
         let merged = &mut cache[window_cache_slot(bytes)];
         if piece[merged.range.clone()] != *bytes {
-            merge_window(bytes, &mut merged.tokens, &mut merged.ends);
+            merge_window::<V>(bytes, &mut merged.tokens, &mut merged.ends);
             merged.range = window.clone();
         }
         match find_shared_token(&tokens, &ends, start, &merged.tokens, &merged.ends) {
@@ -192,17 +192,17 @@ fn window_cache_slot(bytes: &[u8]) -> usize {
 }
 
 /// Exact encoding of `window` into `tokens`, with each token's end offset in `ends`.
-fn merge_window(window: &[u8], tokens: &mut Vec<u32>, ends: &mut Vec<u32>) {
+fn merge_window<V: Vocabulary>(window: &[u8], tokens: &mut Vec<u32>, ends: &mut Vec<u32>) {
     tokens.clear();
     ends.clear();
     if window.len() <= SHORT_PIECE_BYTES {
-        encode_short_piece(window, tokens);
+        encode_short_piece::<V>(window, tokens);
     } else {
-        merge_long_piece(window, |id| tokens.push(id));
+        merge_long_piece::<V>(window, |id| tokens.push(id));
     }
     let mut end = 0;
     ends.extend(tokens.iter().map(|&id| {
-        end += ordinary_token_bytes(id).len() as u32;
+        end += ordinary_token_bytes::<V>(id).len() as u32;
         end
     }));
 }
@@ -238,8 +238,8 @@ const LINKED_MERGE_BYTES: usize = 32;
 
 /// Merges a piece of at most SHORT_PIECE_BYTES bytes; writes its tokens to the front of `tokens`, returns the count.
 #[inline]
-fn merge_short_piece(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
-    if piece.len() < LINKED_MERGE_BYTES { merge_by_shifting(piece, tokens) } else { merge_linked(piece, tokens) }
+fn merge_short_piece<V: Vocabulary>(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
+    if piece.len() < LINKED_MERGE_BYTES { merge_by_shifting::<V>(piece, tokens) } else { merge_linked::<V>(piece, tokens) }
 }
 
 /// A part a merge starts from: `len` bytes at `start` in the piece, which are token `token`.
@@ -253,11 +253,11 @@ struct StartingPart {
 /// Parts a merge starts from, in order: single bytes, except that a character `premerged_char` allows starts
 /// whole. Its bytes would merge into it before joining a neighbor anyway, so the result is the same with fewer
 /// merges: long pieces of 3-byte characters such as CJK need about a third of the parts.
-fn starting_parts(piece: &[u8]) -> impl Iterator<Item = StartingPart> + '_ {
+fn starting_parts<V: Vocabulary>(piece: &[u8]) -> impl Iterator<Item = StartingPart> + '_ {
     let mut start = 0;
     std::iter::from_fn(move || {
         let &byte = piece.get(start)?;
-        let (token, len) = premerged_char(piece, start).unwrap_or((BYTE_TOKENS[byte as usize], 1));
+        let (token, len) = premerged_char::<V>(piece, start).unwrap_or((V::byte_tokens()[byte as usize], 1));
         let part = StartingPart { start, len, token };
         start += len;
         Some(part)
@@ -266,26 +266,26 @@ fn starting_parts(piece: &[u8]) -> impl Iterator<Item = StartingPart> + '_ {
 
 /// Rank of merging two adjacent starting parts; pairs of single bytes use the dense byte-pair table.
 #[inline(always)]
-fn starting_merge_rank(piece: &[u8], left: StartingPart, right: StartingPart) -> u32 {
+fn starting_merge_rank<V: Vocabulary>(piece: &[u8], left: StartingPart, right: StartingPart) -> u32 {
     if left.len == 1 && right.len == 1 {
-        byte_merge_rank(piece[left.start], piece[right.start])
+        byte_merge_rank::<V>(piece[left.start], piece[right.start])
     } else {
-        merge_rank(left.token, right.token)
+        merge_rank::<V>(left.token, right.token)
     }
 }
 
 /// Keeps parts packed at the front: after each merge the parts and ranks above it shift down by one, so each
 /// minimum search covers only the live parts. `position` keeps the leftmost of tied ranks.
 #[inline]
-fn merge_by_shifting(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
+fn merge_by_shifting<V: Vocabulary>(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
     // ranks[i]: rank of merging tokens[i] and tokens[i + 1].
     let mut ranks = [NO_MERGE; LINKED_MERGE_BYTES];
     let mut count = 0;
     let mut previous: Option<StartingPart> = None;
-    for part in starting_parts(piece) {
+    for part in starting_parts::<V>(piece) {
         tokens[count] = part.token;
         if let Some(left) = previous {
-            ranks[count - 1] = starting_merge_rank(piece, left, part);
+            ranks[count - 1] = starting_merge_rank::<V>(piece, left, part);
         }
         previous = Some(part);
         count += 1;
@@ -298,15 +298,18 @@ fn merge_by_shifting(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usi
         }
         let best = live.iter().position(|&rank| rank == best_rank).unwrap_or(0);
         tokens[best] = best_rank;
-        tokens.copy_within(best + 2..count, best + 1);
-        ranks.copy_within(best + 2..count, best + 1);
+        // At most LINKED_MERGE_BYTES elements: a plain loop beats a memmove call.
+        for i in best + 1..count - 1 {
+            tokens[i] = tokens[i + 1];
+            ranks[i] = ranks[i + 1];
+        }
         count -= 1;
         ranks[count - 1] = NO_MERGE;
         if best + 1 < count {
-            ranks[best] = merge_rank(tokens[best], tokens[best + 1]);
+            ranks[best] = merge_rank::<V>(tokens[best], tokens[best + 1]);
         }
         if best > 0 {
-            ranks[best - 1] = merge_rank(tokens[best - 1], tokens[best]);
+            ranks[best - 1] = merge_rank::<V>(tokens[best - 1], tokens[best]);
         }
     }
     count
@@ -316,7 +319,7 @@ fn merge_by_shifting(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usi
 /// the rank of merging part i with its successor above i, so the minimum key is the lowest rank and, among equal
 /// ranks, the leftmost part. Merged-away and last parts hold u32::MAX. `block_min` keeps the minimum of each
 /// KEY_BLOCK keys: a merge changes at most three keys, so only their blocks are rescanned.
-fn merge_linked(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
+fn merge_linked<V: Vocabulary>(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
     const POSITION_BITS: u32 = SHORT_PIECE_BYTES.trailing_zeros();
     const NO_KEY: u32 = u32::MAX;
     const KEY_BLOCK: usize = 32;
@@ -335,22 +338,22 @@ fn merge_linked(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
     if piece.is_ascii() {
         // No character to start whole: the plain byte loop, which matters for long ASCII runs.
         for i in 0..len {
-            tokens[i] = BYTE_TOKENS[piece[i] as usize];
+            tokens[i] = V::byte_tokens()[piece[i] as usize];
             next[i] = i as u8 + 1;
             prev[i] = (i as u8).wrapping_sub(1);
         }
         for i in 0..len - 1 {
-            keys[i] = key(byte_merge_rank(piece[i], piece[i + 1]), i);
+            keys[i] = key(byte_merge_rank::<V>(piece[i], piece[i + 1]), i);
         }
         count = len;
     } else {
         let mut previous: Option<StartingPart> = None;
-        for part in starting_parts(piece) {
+        for part in starting_parts::<V>(piece) {
             tokens[part.start] = part.token;
             next[part.start] = (part.start + part.len) as u8;
             if let Some(left) = previous {
                 prev[part.start] = left.start as u8;
-                keys[left.start] = key(starting_merge_rank(piece, left, part), left.start);
+                keys[left.start] = key(starting_merge_rank::<V>(piece, left, part), left.start);
             }
             previous = Some(part);
             count += 1;
@@ -378,7 +381,7 @@ fn merge_linked(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
         next[start] = after as u8;
         keys[start] = if after < len {
             prev[after] = start as u8;
-            key(merge_rank(merged, tokens[after]), start)
+            key(merge_rank::<V>(merged, tokens[after]), start)
         } else {
             NO_KEY
         };
@@ -386,7 +389,7 @@ fn merge_linked(piece: &[u8], tokens: &mut [u32; SHORT_PIECE_BYTES]) -> usize {
         block_min[start / KEY_BLOCK] = block_of(&keys, start);
         if start > 0 {
             let before = prev[start] as usize;
-            keys[before] = key(merge_rank(tokens[before], merged), before);
+            keys[before] = key(merge_rank::<V>(tokens[before], merged), before);
             block_min[before / KEY_BLOCK] = block_of(&keys, before);
         }
         count -= 1;
@@ -428,15 +431,15 @@ impl PartIndex for usize {
 }
 
 /// Heap-driven merge for long pieces, O(n log n). Emits tokens in order.
-fn merge_long_piece(piece: &[u8], emit: impl FnMut(u32)) {
+fn merge_long_piece<V: Vocabulary>(piece: &[u8], emit: impl FnMut(u32)) {
     if piece.len() < u32::MAX as usize {
-        merge_parts::<u32>(piece, emit);
+        merge_parts::<V, u32>(piece, emit);
     } else {
-        merge_parts::<usize>(piece, emit);
+        merge_parts::<V, usize>(piece, emit);
     }
 }
 
-fn merge_parts<I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u32)) {
+fn merge_parts<V: Vocabulary, I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u32)) {
     let len = piece.len();
     if len == 0 {
         return;
@@ -449,12 +452,12 @@ fn merge_parts<I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u32)) {
     let mut rank = vec![NO_MERGE; len];
     let mut heap = BinaryHeap::with_capacity(len);
     let mut previous: Option<StartingPart> = None;
-    for part in starting_parts(piece) {
+    for part in starting_parts::<V>(piece) {
         tokens[part.start] = part.token;
         if let Some(left) = previous {
             next[left.start] = I::from_index(part.start);
             prev[part.start] = I::from_index(left.start);
-            rank[left.start] = starting_merge_rank(piece, left, part);
+            rank[left.start] = starting_merge_rank::<V>(piece, left, part);
             if rank[left.start] != NO_MERGE {
                 heap.push(Reverse((rank[left.start], I::from_index(left.start))));
             }
@@ -474,14 +477,14 @@ fn merge_parts<I: PartIndex>(piece: &[u8], mut emit: impl FnMut(u32)) {
             prev[after.index()] = I::from_index(start);
         }
         rank[right] = NO_MERGE;
-        rank[start] = if after != I::NONE { merge_rank(merge, tokens[after.index()]) } else { NO_MERGE };
+        rank[start] = if after != I::NONE { merge_rank::<V>(merge, tokens[after.index()]) } else { NO_MERGE };
         if rank[start] != NO_MERGE {
             heap.push(Reverse((rank[start], I::from_index(start))));
         }
         let before = prev[start];
         if before != I::NONE {
             let before = before.index();
-            rank[before] = merge_rank(tokens[before], merge);
+            rank[before] = merge_rank::<V>(tokens[before], merge);
             if rank[before] != NO_MERGE {
                 heap.push(Reverse((rank[before], I::from_index(before))));
             }

@@ -1,15 +1,19 @@
-// Benchmarks for magi-tokenizer against tiktoken-rs and bpe-openai.
+// Benchmarks for magi-tokenizer against tiktoken-rs and bpe-openai, for o200k_base and cl100k_base.
 //
-//   cargo run --release -p magi-tokenizer-bench -- bench    # throughput, all three tokenizers
+//   cargo run --release -p magi-tokenizer-bench -- bench [filter]  # throughput, all three tokenizers
 //   cargo run --release -p magi-tokenizer-bench -- startup <magi|tiktoken|bpe-openai>  # one first-call timing
 //   cargo run --release -p magi-tokenizer-bench -- memory <MiB> <count|encode> <window|fallback>  # one long piece;
 //       run under `/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux) for peak RSS
+//
+// `bench` first checks that magi-tokenizer returns tiktoken's exact token ids, counts, special-token ids and
+// decoded text for every workload; the filter matches encoding or workload names.
 //
 // Inputs: MAGI_TOKENIZER_SOURCE lists source trees (path-list syntax, default: this repository) to cut into chunks.
 // MAGI_TOKENIZER_ASSETS names a directory with o200k_base-200k.txt and session-compacted-500.json; without it those
 // workloads are skipped.
 //
-// The bench enables magi-tokenizer's `harness` feature for fallback counters and forced fallback.
+// The bench enables magi-tokenizer's `harness` feature for fallback counters and forced fallback, and
+// `cl100k_base` for the second encoding.
 
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
@@ -234,15 +238,110 @@ fn time_per_call(works: &[&dyn Fn() -> usize]) -> Vec<f64> {
         .collect()
 }
 
+/// One encoding: its magi-tokenizer functions and both reference tokenizers.
+struct Encoding {
+    name: &'static str,
+    tiktoken: &'static tiktoken_rs::CoreBPE,
+    bpe_openai: &'static bpe_openai::Tokenizer,
+    special_tokens: &'static [(&'static str, u32)],
+    encode: fn(&str) -> Vec<u32>,
+    count: fn(&str) -> usize,
+    encode_with_special_tokens: fn(&str) -> Vec<u32>,
+    count_with_special_tokens: fn(&str) -> usize,
+    decode: fn(&[u32]) -> Option<String>,
+}
+
+fn encodings() -> [Encoding; 2] {
+    use magi_tokenizer::{cl100k_base, o200k_base};
+    [
+        Encoding {
+            name: "o200k",
+            tiktoken: tiktoken_rs::o200k_base_singleton(),
+            bpe_openai: bpe_openai::o200k_base(),
+            special_tokens: &o200k_base::SPECIAL_TOKENS,
+            encode: o200k_base::encode_ordinary,
+            count: o200k_base::count_ordinary,
+            encode_with_special_tokens: o200k_base::encode_with_special_tokens,
+            count_with_special_tokens: o200k_base::count_with_special_tokens,
+            decode: o200k_base::decode,
+        },
+        Encoding {
+            name: "cl100k",
+            tiktoken: tiktoken_rs::cl100k_base_singleton(),
+            bpe_openai: bpe_openai::cl100k_base(),
+            special_tokens: &cl100k_base::SPECIAL_TOKENS,
+            encode: cl100k_base::encode_ordinary,
+            count: cl100k_base::count_ordinary,
+            encode_with_special_tokens: cl100k_base::encode_with_special_tokens,
+            count_with_special_tokens: cl100k_base::count_with_special_tokens,
+            decode: cl100k_base::decode,
+        },
+    ]
+}
+
+/// Short random strings over atoms where the pretokenization alternatives meet: contractions, case, digit runs,
+/// punctuation before newlines, and whitespace before text, newlines and the end.
+fn scanner_edge_cases() -> Vec<String> {
+    let atoms = [
+        " ", "  ", "\t", "\n", "\r\n", "\r", "\u{a0}", "\u{2028}", "\u{3000}", "'", "'s", "'S", "'ll", "'LL", "'ve",
+        "'Re", "'d", "'m", "'t", "'ſ", "a", "Ab", "CD", "é", "É", "ǅ", "\u{301}", "ß", "1", "234", "٣", "Ⅻ", "½", "!",
+        "?!", ".", "...", "-", "<|", "|>", "你", "🙂", "\u{200d}", "\u{feff}",
+    ];
+    let mut state = 0x2468_ACE0_1357_9BDFu64;
+    (0..20_000)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = 1 + (state % 12) as usize;
+            (0..len).map(|i| atoms[((state >> (8 + 4 * i)) as usize ^ (i * 31)) % atoms.len()]).collect()
+        })
+        .collect()
+}
+
+/// Scalars of the first three planes and plane 14, each in contexts that select different pretokenization
+/// alternatives, in texts of 256 scalars.
+fn unicode_sweep() -> Vec<String> {
+    let contexts = [("a", "b"), (" ", "1"), ("", "'s"), ("\n", " "), ("A", "a"), ("x ", "\r\n")];
+    let scalars: Vec<char> = (0..0x3_0000).chain(0xE_0000..0xE_0200).filter_map(char::from_u32).collect();
+    contexts
+        .iter()
+        .flat_map(|(before, after)| {
+            scalars.chunks(256).map(move |chunk| chunk.iter().map(|c| format!("{before}{c}{after}")).collect())
+        })
+        .collect()
+}
+
+/// Asserts that magi-tokenizer gives tiktoken's exact ids for `texts`, ordinary and with special tokens, that counts
+/// match and that decoding round-trips. Special tokens are spliced between texts so they are matched in context.
+fn check_exact(encoding: &Encoding, workload: &str, texts: &[String]) {
+    let name = format!("{}/{workload}", encoding.name);
+    for (index, text) in texts.iter().enumerate() {
+        let expected = encoding.tiktoken.encode_ordinary(text);
+        assert_eq!((encoding.encode)(text), expected, "{name}: ids differ for text {index}: {text:?}");
+        assert_eq!((encoding.count)(text), expected.len(), "{name}: count differs for text {index}");
+        assert_eq!((encoding.decode)(&expected).as_deref(), Some(text.as_str()), "{name}: decode differs");
+    }
+    let joined = texts.iter().take(2000).enumerate().fold(String::new(), |mut joined, (index, text)| {
+        joined.push_str(text);
+        joined.push_str(encoding.special_tokens[index % encoding.special_tokens.len()].0);
+        joined.push_str("<|endof");
+        joined
+    });
+    let expected = encoding.tiktoken.encode_with_special_tokens(&joined);
+    assert_eq!((encoding.encode_with_special_tokens)(&joined), expected, "{name}: special-token ids differ");
+    assert_eq!((encoding.count_with_special_tokens)(&joined), expected.len(), "{name}: special-token count differs");
+    assert_eq!((encoding.decode)(&expected).as_deref(), Some(joined.as_str()), "{name}: special-token decode differs");
+}
+
 fn bench(filter: Option<&str>) -> Result<()> {
-    let tiktoken = tiktoken_rs::o200k_base_singleton();
-    let bpe_openai = bpe_openai::o200k_base();
     let source = source_text();
     let mut workloads: Vec<(&str, Vec<String>)> = vec![
         ("source_1MiB", vec![source[..source.floor_char_boundary(1 << 20)].to_owned()]),
         ("source_48B_chunks", chunks(&source[..source.floor_char_boundary(256 << 10)], 48)),
         ("source_256B_chunks", chunks(&source[..source.floor_char_boundary(256 << 10)], 256)),
         ("multilingual", vec![multilingual_text()]),
+        ("scanner_edges", scanner_edge_cases()),
         ("long_runs", long_runs()),
         ("long_unrepeated", long_unrepeated_pieces()),
     ];
@@ -252,46 +351,68 @@ fn bench(filter: Option<&str>) -> Result<()> {
     if let Some(snapshots) = session_snapshots()? {
         workloads.push(("session_snapshots", snapshots.into_iter().step_by(10).collect()));
     }
-    println!(
-        "{:<20} {:>9} | {:>11} {:>11} {:>11} | {:>11} {:>11} {:>11} | speedup vs tiktoken / bpe-openai",
-        "workload", "MiB", "magi cnt", "tiktok cnt", "bpeoai cnt", "magi enc", "tiktok enc", "bpeoai enc"
-    );
-    for (name, texts) in &workloads {
-        if filter.is_some_and(|filter| !name.contains(filter)) {
-            continue;
+    let selected = |name: &str| filter.is_none_or(|filter| name.contains(filter));
+    // Checked but not timed: too slow for tiktoken to time, or measuring a forced path.
+    let sweep = unicode_sweep();
+    let long_pieces: Vec<String> = long_runs().into_iter().chain(long_unrepeated_pieces()).collect();
+    for encoding in &encodings() {
+        let name = format!("{}/unicode_sweep", encoding.name);
+        if selected(&name) {
+            check_exact(encoding, "unicode_sweep", &sweep);
+            println!("{name}: exact ids for {} texts", sweep.len());
         }
-        let expected: usize = texts.iter().map(|text| tiktoken.encode_ordinary(text).len()).sum();
-        let magi_count: usize = texts.iter().map(|text| magi_tokenizer::count_ordinary(text)).sum();
-        let bpe_count: usize = texts.iter().map(|text| bpe_openai.count(text.as_str())).sum();
-        assert_eq!(magi_count, expected, "{name}: magi-tokenizer count differs");
-        assert_eq!(bpe_count, expected, "{name}: bpe-openai count differs");
-        let bytes: usize = texts.iter().map(String::len).sum();
-        let mib = bytes as f64 / (1 << 20) as f64;
-        let throughput = |micros: f64| mib / (micros / 1e6);
-        let sum_over = |f: &dyn Fn(&str) -> usize| texts.iter().map(|text| f(black_box(text))).sum::<usize>();
-        let times = time_per_call(&[
-            &|| sum_over(&|text| magi_tokenizer::count_ordinary(text)),
-            &|| sum_over(&|text| tiktoken.encode_ordinary(text).len()),
-            &|| sum_over(&|text| bpe_openai.count(text)),
-            &|| sum_over(&|text| magi_tokenizer::encode_ordinary(text).len()),
-            &|| sum_over(&|text| bpe_openai.encode(text).len()),
-        ]);
-        // tiktoken has no count; its encode serves as both.
-        let [magi_cnt, tik, bpe_cnt, magi_enc, bpe_enc] = times[..] else { unreachable!() };
-        println!(
-            "{name:<20} {mib:>9.3} | {:>7.1}MiB/s {:>7.1}MiB/s {:>7.1}MiB/s | {:>7.1}MiB/s {:>7.1}MiB/s {:>7.1}MiB/s | \
-             count {:.2}x/{:.2}x encode {:.2}x/{:.2}x",
-            throughput(magi_cnt),
-            throughput(tik),
-            throughput(bpe_cnt),
-            throughput(magi_enc),
-            throughput(tik),
-            throughput(bpe_enc),
-            tik / magi_cnt,
-            bpe_cnt / magi_cnt,
-            tik / magi_enc,
-            bpe_enc / magi_enc,
-        );
+        let name = format!("{}/forced_fallback", encoding.name);
+        if selected(&name) {
+            harness::fail_window_merge_after_stitches(Some(0));
+            harness::reset_fallback_counters();
+            check_exact(encoding, "forced_fallback", &long_pieces);
+            harness::fail_window_merge_after_stitches(None);
+            assert!(harness::fallback_pieces() > 0, "{name}: no piece fell back");
+            println!("{name}: exact ids for {} texts, {} fallbacks", long_pieces.len(), harness::fallback_pieces());
+        }
+    }
+    println!(
+        "{:<27} {:>9} | {:>11} {:>11} {:>11} | {:>11} {:>11} {:>11} | speedup vs tiktoken / bpe-openai",
+        "encoding/workload", "MiB", "magi cnt", "tiktok cnt", "bpeoai cnt", "magi enc", "tiktok enc", "bpeoai enc"
+    );
+    for encoding in &encodings() {
+        for (workload, texts) in &workloads {
+            let name = format!("{}/{workload}", encoding.name);
+            if !selected(&name) {
+                continue;
+            }
+            check_exact(encoding, workload, texts);
+            let expected: usize = texts.iter().map(|text| encoding.tiktoken.encode_ordinary(text).len()).sum();
+            let bpe_count: usize = texts.iter().map(|text| encoding.bpe_openai.count(text.as_str())).sum();
+            assert_eq!(bpe_count, expected, "{name}: bpe-openai count differs");
+            let bytes: usize = texts.iter().map(String::len).sum();
+            let mib = bytes as f64 / (1 << 20) as f64;
+            let throughput = |micros: f64| mib / (micros / 1e6);
+            let sum_over = |f: &dyn Fn(&str) -> usize| texts.iter().map(|text| f(black_box(text))).sum::<usize>();
+            let times = time_per_call(&[
+                &|| sum_over(&|text| (encoding.count)(text)),
+                &|| sum_over(&|text| encoding.tiktoken.encode_ordinary(text).len()),
+                &|| sum_over(&|text| encoding.bpe_openai.count(text)),
+                &|| sum_over(&|text| (encoding.encode)(text).len()),
+                &|| sum_over(&|text| encoding.bpe_openai.encode(text).len()),
+            ]);
+            // tiktoken has no count; its encode serves as both.
+            let [magi_cnt, tik, bpe_cnt, magi_enc, bpe_enc] = times[..] else { unreachable!() };
+            println!(
+                "{name:<27} {mib:>9.3} | {:>7.1}MiB/s {:>7.1}MiB/s {:>7.1}MiB/s | {:>7.1}MiB/s {:>7.1}MiB/s {:>7.1}MiB/s | \
+                 count {:.2}x/{:.2}x encode {:.2}x/{:.2}x",
+                throughput(magi_cnt),
+                throughput(tik),
+                throughput(bpe_cnt),
+                throughput(magi_enc),
+                throughput(tik),
+                throughput(bpe_enc),
+                tik / magi_cnt,
+                bpe_cnt / magi_cnt,
+                tik / magi_enc,
+                bpe_enc / magi_enc,
+            );
+        }
     }
     Ok(())
 }

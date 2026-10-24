@@ -11,6 +11,24 @@ There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-t
   tracked in issues #8–#17. The README published with 0.0.2 still links to the old path.
 - Added this changelog, backfilled from git history.
 
+- Short-piece speedups for both encodings ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)): one- and
+  two-byte pieces skip the vocabulary hash table, merges of pieces under 32 bytes shift parts with a loop instead
+  of memmove, and encoding loops scan byte slices. Interleaved runs against `824a427` on one ARM64 macOS machine
+  measured +0.5% to +3.2% throughput; token IDs are unchanged.
+
+### Added
+
+- `cl100k_base` encoding behind the `cl100k_base` feature ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)):
+  module `magi_tokenizer::cl100k_base` with the same functions and constants as `o200k_base`, a second hand-written
+  scanner for its regex, and its own build-time tables. Programs that call it grow by about 10 MB (fat-LTO release,
+  ARM64 macOS: 20.1 → 30.2 MB); enabling the feature without calling it does not change size. Clean release builds
+  of a one-call program took 3.6 s without the feature and 4.5 s with it.
+- Module `magi_tokenizer::o200k_base`; the crate root still re-exports it, so existing code is unchanged.
+- `bench` checks exact token IDs, counts, special tokens and decoding against tiktoken-rs for both encodings before
+  timing, including a Unicode sweep, scanner edge cases and forced whole-piece fallback.
+- README documents that `o200k_harmony` ordinary encoding matches `o200k_base` (special tokens differ, #18), and
+  that legacy 50k encodings are not implemented (#19).
+
 ### Removed
 
 - Differential verification and file-check commands, their test-only hooks and direct dependencies, and CI test runs.

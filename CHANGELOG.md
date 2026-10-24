@@ -11,6 +11,11 @@ There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-t
   tracked in issues #8–#17. The README published with 0.0.2 still links to the old path.
 - Added this changelog, backfilled from git history.
 
+- Short-piece speedups for both encodings ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)): one- and
+  two-byte pieces skip the vocabulary hash table, merges of pieces under 32 bytes shift parts with a loop instead
+  of memmove, and encoding loops scan byte slices. Interleaved runs against `824a427` on one ARM64 macOS machine
+  measured +0.5% to +3.2% throughput; token IDs are unchanged.
+
 ### Added
 
 - `cl100k_base` encoding behind the `cl100k_base` feature ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)):

@@ -181,7 +181,8 @@ See [Provenance](#provenance-and-licensing).
 
 ### Byte-pair merging (`src/bpe.rs`)
 
-Most pieces are vocabulary tokens: one hash-table probe returns their ID without merging. Other pieces take one of two paths:
+Most pieces are vocabulary tokens: one- and two-byte pieces are read from direct byte and byte-pair tables, and longer
+ones take one hash-table probe, returning their ID without merging. Other pieces take one of two paths:
 
 - Up to 128 bytes: fixed stack arrays, no allocation. Under 32 bytes, a vectorised minimum finds the lowest rank,
   then its first position breaks ties. Merging shifts the remaining tokens down, which measured faster at this size.

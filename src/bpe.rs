@@ -298,8 +298,11 @@ fn merge_by_shifting<V: Vocabulary>(piece: &[u8], tokens: &mut [u32; SHORT_PIECE
         }
         let best = live.iter().position(|&rank| rank == best_rank).unwrap_or(0);
         tokens[best] = best_rank;
-        tokens.copy_within(best + 2..count, best + 1);
-        ranks.copy_within(best + 2..count, best + 1);
+        // At most LINKED_MERGE_BYTES elements: a plain loop beats a memmove call.
+        for i in best + 1..count - 1 {
+            tokens[i] = tokens[i + 1];
+            ranks[i] = ranks[i + 1];
+        }
         count -= 1;
         ranks[count - 1] = NO_MERGE;
         if best + 1 < count {

@@ -52,7 +52,7 @@ cargo run --release -p magi-tokenizer-bench -- memory 64 count window
 - Preserve scanner alternative ordering, backtracking, Unicode behavior, and long-s U+017F case folding.
 - BPE selects the lowest-rank adjacent pair with leftmost tie-breaking; rank equals token ID.
 - Pieces up to 128 bytes use stack merging and whole-token lookup.
-- Larger pieces use overlapping windows from 128 to 4096 bytes, then whole-piece heap fallback.
+- Larger pieces use overlapping windows from 128 to 4096 bytes, then whole-piece fallback (tournament-tree merge, 20 bytes per piece byte).
 - Cache matches require full-byte equality, not hash equality alone.
 - A failed window pass may have appended output: roll back only the current piece before fallback.
 - Reset the current piece's count before fallback; preserve earlier pieces' output and counts.

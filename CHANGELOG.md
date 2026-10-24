@@ -1,12 +1,19 @@
 # Changelog
 
 Notable changes to magi-tokenizer. Versions are published on [crates.io](https://crates.io/crates/magi-tokenizer).
-There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)): pin an exact version.
+0.0.x releases have no compatibility promise: pin an exact version. From 0.1.0, releases follow the README's
+[compatibility policy](README.md#compatibility), and breaking changes are listed under "Breaking".
 
 ## [Unreleased]
 
 ### Changed
 
+- README documents the compatibility policy ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)),
+  starting with 0.1.0. Within a minor version, token IDs stay equal to tiktoken-rs 0.12.0 with Unicode 16 data,
+  public items of the crate root, `o200k_base` and `cl100k_base` and the `cl100k_base` feature are kept, and the
+  minimum Rust version stays 1.88. Breaking any of these needs a new minor version; reference mismatches are fixed
+  as bugs in patch releases. `harness`, speed, memory, binary size and build time are not covered. GitHub releases
+  repeat the changelog section.
 - The magi-code pilot plan moved to `docs/archive/magi-code-pilot.md` and is no longer maintained. Remaining gaps are
   tracked in issues #8–#17. The README published with 0.0.2 still links to the old path.
 - Added this changelog, backfilled from git history.

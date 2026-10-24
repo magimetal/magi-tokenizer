@@ -6,6 +6,13 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-24
+
+First release under the README's [compatibility policy](README.md#compatibility). Release check: the full,
+unfiltered `bench` passed on `7e90235` and again on the 0.1.0 tree (Rust 1.98.1, Apple M5 Pro) with
+`MAGI_TOKENIZER_ASSETS` set, listing `fixture_200k` and `session_snapshots` rows for every encoding. The release
+commit changes only the version and documentation. CI passed on `7e90235`.
+
 ### Added
 
 - `r50k_base`, `p50k_base` and `p50k_edit` encodings ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)):
@@ -27,7 +34,6 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
   one called, 4.6 s with both called (median of three). `o200k_base` and `cl100k_base` throughput is unchanged
   within noise in interleaved runs against `e4543bc` on one fixed corpus (cl100k source count
   307/294/257 → 306/291/256 MiB/s for 1 MiB/256 B/48 B chunks, four rounds each).
-
 - `o200k_harmony` encoding (`gpt-oss-*`) ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)): module
   `magi_tokenizer::o200k_harmony` with the same functions as the other encodings. It reuses `o200k_base`'s scanner
   and tables, so ordinary IDs are identical; its 1,090 special tokens (IDs 199,998–201,087, named tokens plus
@@ -37,6 +43,20 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
 - `bench` checks `o200k_harmony` exact IDs, counts, decoding, allow-lists and disallowed-special errors against
   tiktoken-rs on every workload. bpe-openai has no Harmony tokenizer, so Harmony's ordinary workloads are checked,
   not timed. A new `special_tokens` workload times special-token encoding against tiktoken-rs for all encodings.
+- Special-token allow-lists and error mode for both encodings
+  ([#10](https://github.com/magimetal/magi-tokenizer/issues/10)): `encode_allowing_special` and
+  `count_allowing_special` match tiktoken-rs 0.12.0 `CoreBPE::encode(text, allowed_special)`. `encode` and `count`
+  follow Python tiktoken's default `encode()`: special-token text not in the allow-list returns
+  `Err(DisallowedSpecialToken)` with the leftmost token and its byte offset. `bench` checks both against the
+  references before timing.
+- `cl100k_base` encoding behind the `cl100k_base` feature ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)):
+  module `magi_tokenizer::cl100k_base` with the same functions and constants as `o200k_base`, a second hand-written
+  scanner for its regex, and its own build-time tables. Programs that call it grow by about 10 MB (fat-LTO release,
+  ARM64 macOS: 20.1 → 30.2 MB); enabling the feature without calling it does not change size. Clean release builds
+  of a one-call program took 3.6 s without the feature and 4.5 s with it.
+- Module `magi_tokenizer::o200k_base`; the crate root still re-exports it, so existing code is unchanged.
+- `bench` checks exact token IDs, counts, special tokens and decoding against tiktoken-rs for both encodings before
+  timing, including a Unicode sweep, scanner edge cases and forced whole-piece fallback.
 
 ### Changed
 
@@ -49,9 +69,9 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
   `special_tokens` workload measured o200k 271 → 268 MiB/s and cl100k 274 → 271 MiB/s (median of 3), about 1% lower
   and within the 27 MiB/s spread between runs. `o200k_harmony` special-token encoding runs at about 240 MiB/s,
   about 10× tiktoken-rs.
-
-### Changed
-
+- README benchmark tables refreshed from the 0.1.0 release run, now covering every encoding and workload, and
+  startup re-measured (first count 0.014 ms, tiktoken-rs 37 ms, bpe-openai 23 ms). Quick start uses
+  `magi-tokenizer = "0.1"`.
 - README documents the compatibility policy ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)),
   starting with 0.1.0. Within a minor version, token IDs stay equal to tiktoken-rs 0.12.0 with Unicode 16 data,
   public items of the crate root, `o200k_base` and `cl100k_base` and the `cl100k_base` feature are kept, and the
@@ -69,7 +89,6 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
 - Release step for private inputs ([#17](https://github.com/magimetal/magi-tokenizer/issues/17)): README
   "Releasing" requires a full, unfiltered `bench` run with `MAGI_TOKENIZER_ASSETS` set before each publish, since CI
   cannot check `fixture_200k` or `session_snapshots`. `bench` now prints a notice to stderr when it skips them.
-
 - Short-piece speedups for both encodings ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)): one- and
   two-byte pieces skip the vocabulary hash table, merges of pieces under 32 bytes shift parts with a loop instead
   of memmove, and encoding loops scan byte slices. Interleaved runs against `824a427` on one ARM64 macOS machine
@@ -89,25 +108,6 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
   to 115.7 MiB/s in `cl100k_base` (1.34×, was 0.64×). `o200k_base` `long_unrepeated`, which includes random CJK, rose
   from 68.6 to 76.0 MiB/s; other workloads stayed within run-to-run variation. Token IDs
   are unchanged: `bench` exact-ID checks pass for both encodings, including `unicode_sweep` and `forced_fallback`.
-
-### Added
-
-- Special-token allow-lists and error mode for both encodings
-  ([#10](https://github.com/magimetal/magi-tokenizer/issues/10)): `encode_allowing_special` and
-  `count_allowing_special` match tiktoken-rs 0.12.0 `CoreBPE::encode(text, allowed_special)`. `encode` and `count`
-  follow Python tiktoken's default `encode()`: special-token text not in the allow-list returns
-  `Err(DisallowedSpecialToken)` with the leftmost token and its byte offset. `bench` checks both against the
-  references before timing.
-- `cl100k_base` encoding behind the `cl100k_base` feature ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)):
-  module `magi_tokenizer::cl100k_base` with the same functions and constants as `o200k_base`, a second hand-written
-  scanner for its regex, and its own build-time tables. Programs that call it grow by about 10 MB (fat-LTO release,
-  ARM64 macOS: 20.1 → 30.2 MB); enabling the feature without calling it does not change size. Clean release builds
-  of a one-call program took 3.6 s without the feature and 4.5 s with it.
-- Module `magi_tokenizer::o200k_base`; the crate root still re-exports it, so existing code is unchanged.
-- `bench` checks exact token IDs, counts, special tokens and decoding against tiktoken-rs for both encodings before
-  timing, including a Unicode sweep, scanner edge cases and forced whole-piece fallback.
-- README documents that `o200k_harmony` ordinary encoding matches `o200k_base` (special tokens differ, #18), and
-  that legacy 50k encodings are not implemented (#19).
 
 ### Removed
 
@@ -153,6 +153,7 @@ First release. Published from commit `23c0680` with the version set to 0.0.1 loc
 - Licensing: license expression `Apache-2.0 AND MIT AND Unicode-3.0`, full Unicode License v3 in `NOTICE`
   ([#5](https://github.com/magimetal/magi-tokenizer/issues/5)).
 
-[Unreleased]: https://github.com/magimetal/magi-tokenizer/compare/v0.0.2...HEAD
+[Unreleased]: https://github.com/magimetal/magi-tokenizer/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/magimetal/magi-tokenizer/compare/v0.0.2...v0.1.0
 [0.0.2]: https://github.com/magimetal/magi-tokenizer/compare/23c0680...v0.0.2
 [0.0.1]: https://github.com/magimetal/magi-tokenizer/tree/23c0680

@@ -1,4 +1,5 @@
-// Benchmarks for magi-tokenizer against tiktoken-rs and bpe-openai, for o200k_base, o200k_harmony and cl100k_base.
+// Benchmarks for magi-tokenizer against tiktoken-rs and bpe-openai, for o200k_base, o200k_harmony, cl100k_base,
+// r50k_base, p50k_base and p50k_edit.
 //
 //   cargo run --release -p magi-tokenizer-bench -- bench [filter]  # throughput, all three tokenizers
 //   cargo run --release -p magi-tokenizer-bench -- startup <magi|tiktoken|bpe-openai>  # one first-call timing
@@ -6,16 +7,17 @@
 //       run under `/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux) for peak RSS
 //
 // `bench` first checks that magi-tokenizer returns tiktoken's exact token ids, counts, special-token ids and
-// decoded text for every workload; the filter matches encoding or workload names. bpe-openai has no
-// o200k_harmony, whose ordinary encoding is o200k_base's: it is checked against tiktoken-rs but not timed, except
-// for the `special_tokens` workload, which times special-token encoding for every encoding.
+// decoded text for every workload; the filter matches encoding or workload names. o200k_harmony and p50k_edit share
+// the ordinary encoding of o200k_base and p50k_base: they are checked against tiktoken-rs but not timed, except for
+// the `special_tokens` workload, which times special-token encoding for every encoding. bpe-openai has no r50k_base
+// or p50k_base, so those are timed against tiktoken-rs only.
 //
 // Inputs: MAGI_TOKENIZER_SOURCE lists source trees (path-list syntax, default: this repository) to cut into chunks.
 // MAGI_TOKENIZER_ASSETS names a directory with o200k_base-200k.txt and session-compacted-500.json; without it those
 // workloads are skipped.
 //
 // The bench enables magi-tokenizer's `harness` feature for fallback counters and forced fallback, and
-// `cl100k_base` for the second encoding.
+// `cl100k_base`, `r50k_base` and `p50k_base` for the other encodings.
 
 use std::collections::HashSet;
 use std::hint::black_box;
@@ -252,6 +254,8 @@ struct Encoding {
     name: &'static str,
     tiktoken: &'static tiktoken_rs::CoreBPE,
     bpe_openai: Option<&'static bpe_openai::Tokenizer>,
+    /// The encoding with the same ordinary encoding that times it, if not this one.
+    ordinary_timed_by: Option<&'static str>,
     special_tokens: &'static [(&'static str, u32)],
     encode: fn(&str) -> Vec<u32>,
     count: fn(&str) -> usize,
@@ -264,54 +268,36 @@ struct Encoding {
     decode: fn(&[u32]) -> Option<String>,
 }
 
-fn encodings() -> [Encoding; 3] {
-    use magi_tokenizer::{cl100k_base, o200k_base, o200k_harmony};
+/// The `Encoding` of magi-tokenizer module `$module`.
+macro_rules! encoding {
+    ($name:literal, $module:ident, $tiktoken:expr, $bpe_openai:expr, $ordinary_timed_by:expr) => {
+        Encoding {
+            name: $name,
+            tiktoken: $tiktoken,
+            bpe_openai: $bpe_openai,
+            ordinary_timed_by: $ordinary_timed_by,
+            special_tokens: &magi_tokenizer::$module::SPECIAL_TOKENS,
+            encode: magi_tokenizer::$module::encode_ordinary,
+            count: magi_tokenizer::$module::count_ordinary,
+            encode_with_special_tokens: magi_tokenizer::$module::encode_with_special_tokens,
+            count_with_special_tokens: magi_tokenizer::$module::count_with_special_tokens,
+            encode_allowing_special: magi_tokenizer::$module::encode_allowing_special,
+            count_allowing_special: magi_tokenizer::$module::count_allowing_special,
+            encode_rejecting_special: magi_tokenizer::$module::encode,
+            count_rejecting_special: magi_tokenizer::$module::count,
+            decode: magi_tokenizer::$module::decode,
+        }
+    };
+}
+
+fn encodings() -> [Encoding; 6] {
     [
-        Encoding {
-            name: "o200k",
-            tiktoken: tiktoken_rs::o200k_base_singleton(),
-            bpe_openai: Some(bpe_openai::o200k_base()),
-            special_tokens: &o200k_base::SPECIAL_TOKENS,
-            encode: o200k_base::encode_ordinary,
-            count: o200k_base::count_ordinary,
-            encode_with_special_tokens: o200k_base::encode_with_special_tokens,
-            count_with_special_tokens: o200k_base::count_with_special_tokens,
-            encode_allowing_special: o200k_base::encode_allowing_special,
-            count_allowing_special: o200k_base::count_allowing_special,
-            encode_rejecting_special: o200k_base::encode,
-            count_rejecting_special: o200k_base::count,
-            decode: o200k_base::decode,
-        },
-        Encoding {
-            name: "harmony",
-            tiktoken: tiktoken_rs::o200k_harmony_singleton(),
-            bpe_openai: None,
-            special_tokens: &o200k_harmony::SPECIAL_TOKENS,
-            encode: o200k_harmony::encode_ordinary,
-            count: o200k_harmony::count_ordinary,
-            encode_with_special_tokens: o200k_harmony::encode_with_special_tokens,
-            count_with_special_tokens: o200k_harmony::count_with_special_tokens,
-            encode_allowing_special: o200k_harmony::encode_allowing_special,
-            count_allowing_special: o200k_harmony::count_allowing_special,
-            encode_rejecting_special: o200k_harmony::encode,
-            count_rejecting_special: o200k_harmony::count,
-            decode: o200k_harmony::decode,
-        },
-        Encoding {
-            name: "cl100k",
-            tiktoken: tiktoken_rs::cl100k_base_singleton(),
-            bpe_openai: Some(bpe_openai::cl100k_base()),
-            special_tokens: &cl100k_base::SPECIAL_TOKENS,
-            encode: cl100k_base::encode_ordinary,
-            count: cl100k_base::count_ordinary,
-            encode_with_special_tokens: cl100k_base::encode_with_special_tokens,
-            count_with_special_tokens: cl100k_base::count_with_special_tokens,
-            encode_allowing_special: cl100k_base::encode_allowing_special,
-            count_allowing_special: cl100k_base::count_allowing_special,
-            encode_rejecting_special: cl100k_base::encode,
-            count_rejecting_special: cl100k_base::count,
-            decode: cl100k_base::decode,
-        },
+        encoding!("o200k", o200k_base, tiktoken_rs::o200k_base_singleton(), Some(bpe_openai::o200k_base()), None),
+        encoding!("harmony", o200k_harmony, tiktoken_rs::o200k_harmony_singleton(), None, Some("o200k")),
+        encoding!("cl100k", cl100k_base, tiktoken_rs::cl100k_base_singleton(), Some(bpe_openai::cl100k_base()), None),
+        encoding!("r50k", r50k_base, tiktoken_rs::r50k_base_singleton(), None, None),
+        encoding!("p50k", p50k_base, tiktoken_rs::p50k_base_singleton(), None, None),
+        encoding!("p50k_edit", p50k_edit, tiktoken_rs::p50k_edit_singleton(), None, Some("p50k")),
     ]
 }
 
@@ -483,18 +469,38 @@ fn bench(filter: Option<&str>) -> Result<()> {
                 continue;
             }
             check_exact(encoding, workload, texts);
-            // Without bpe-openai the encoding is o200k_harmony, whose ordinary encoding o200k timed already.
+            if let Some(timed_by) = encoding.ordinary_timed_by {
+                println!("{name:<27} exact ids for {} texts; same ordinary encoding as {timed_by}, not timed", texts.len());
+                continue;
+            }
+            let bytes: usize = texts.iter().map(String::len).sum();
+            let mib = bytes as f64 / (1 << 20) as f64;
+            let throughput = |micros: f64| mib / (micros / 1e6);
+            let sum_over = |f: &dyn Fn(&str) -> usize| texts.iter().map(|text| f(black_box(text))).sum::<usize>();
             let Some(bpe_openai) = encoding.bpe_openai else {
-                println!("{name:<27} exact ids for {} texts; same ordinary encoding as o200k, not timed", texts.len());
+                let times = time_per_call(&[
+                    &|| sum_over(&|text| (encoding.count)(text)),
+                    &|| sum_over(&|text| encoding.tiktoken.encode_ordinary(text).len()),
+                    &|| sum_over(&|text| (encoding.encode)(text).len()),
+                ]);
+                let [magi_cnt, tik, magi_enc] = times[..] else { unreachable!() };
+                println!(
+                    "{name:<27} {mib:>9.3} | {:>7.1}MiB/s {:>7.1}MiB/s {:>11} | {:>7.1}MiB/s {:>7.1}MiB/s {:>11} | \
+                     count {:.2}x encode {:.2}x",
+                    throughput(magi_cnt),
+                    throughput(tik),
+                    "-",
+                    throughput(magi_enc),
+                    throughput(tik),
+                    "-",
+                    tik / magi_cnt,
+                    tik / magi_enc,
+                );
                 continue;
             };
             let expected: usize = texts.iter().map(|text| encoding.tiktoken.encode_ordinary(text).len()).sum();
             let bpe_count: usize = texts.iter().map(|text| bpe_openai.count(text.as_str())).sum();
             assert_eq!(bpe_count, expected, "{name}: bpe-openai count differs");
-            let bytes: usize = texts.iter().map(String::len).sum();
-            let mib = bytes as f64 / (1 << 20) as f64;
-            let throughput = |micros: f64| mib / (micros / 1e6);
-            let sum_over = |f: &dyn Fn(&str) -> usize| texts.iter().map(|text| f(black_box(text))).sum::<usize>();
             let times = time_per_call(&[
                 &|| sum_over(&|text| (encoding.count)(text)),
                 &|| sum_over(&|text| encoding.tiktoken.encode_ordinary(text).len()),

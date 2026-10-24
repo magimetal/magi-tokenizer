@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 # Apache-2.0 for the code; MIT for the bundled tiktoken vocabularies; Unicode-3.0 for the generated Unicode classes.
 license = "Apache-2.0 AND MIT AND Unicode-3.0"
-description = "Exact, fast o200k_base, o200k_harmony and cl100k_base BPE tokenizer with build-time tables and hand-written pretokenizers"
+description = "Exact, fast o200k_base, o200k_harmony, cl100k_base, r50k_base, p50k_base and p50k_edit BPE tokenizer with build-time tables and hand-written pretokenizers"
 repository = "https://github.com/magimetal/magi-tokenizer"
 include = ["/src", "/build.rs", "/assets", "/LICENSE", "/NOTICE", "/README.md", "/CHANGELOG.md"]
 
@@ -19,6 +19,12 @@ harness = []
 # cl100k_base encoding (`magi_tokenizer::cl100k_base`). Its tables add about 10 MB to programs that call it;
 # unused tables are dropped at link time.
 cl100k_base = []
+# r50k_base encoding (`magi_tokenizer::r50k_base`, also called gpt2). Its tables add about 5 MB to programs that
+# call it.
+r50k_base = []
+# p50k_base and p50k_edit encodings (`magi_tokenizer::p50k_base`, `magi_tokenizer::p50k_edit`), which share tables
+# adding about 5 MB to programs that call either.
+p50k_base = []
 
 [workspace]
 members = ["bench"]

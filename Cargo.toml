@@ -7,7 +7,7 @@ rust-version = "1.88"
 license = "Apache-2.0 AND MIT AND Unicode-3.0"
 description = "Exact, fast o200k_base BPE tokenizer with build-time tables and a hand-written pretokenizer"
 repository = "https://github.com/magimetal/magi-tokenizer"
-include = ["/src", "/build.rs", "/assets", "/LICENSE", "/NOTICE", "/README.md"]
+include = ["/src", "/build.rs", "/assets", "/LICENSE", "/NOTICE", "/README.md", "/CHANGELOG.md"]
 
 [lib]
 name = "magi_tokenizer"

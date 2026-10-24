@@ -45,8 +45,9 @@ and table pages loaded on demand (see [Startup](#startup)).
 
 ## Using it in your project
 
-- Pin an exact version and commit `Cargo.lock`. There is no changelog or compatibility promise, and the API can
-  change between releases. For git dependencies, pin a full commit hash whose CI passed. Do not enable `harness`:
+- Pin an exact version and commit `Cargo.lock`. Changes are listed in [CHANGELOG.md](CHANGELOG.md). There is no
+  compatibility promise, and the API can change between releases. For git dependencies, pin a full commit hash
+  whose CI passed. Do not enable `harness`:
   it exposes verification hooks for `bench/`, not public API.
 - `encode_ordinary` matches tiktoken's `encode_ordinary`. `encode_with_special_tokens` matches
   `encode(text, allowed_special="all")`. To reject special-token text like tiktoken's default `encode()`, or allow

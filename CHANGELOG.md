@@ -23,8 +23,12 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
 - Special-token lookup takes the text from `<|` to the next `|>` as the only candidate and binary-searches it for
   long lists (`o200k_harmony`), instead of comparing every token at each `<|`. `token_bytes` finds special IDs by
   binary search. Compile-time assertions check that each `SPECIAL_TOKENS` list is sorted by ID and that every
-  token is `<|`…`|>` with no inner `|>`. Interleaved runs show `o200k_base` and `cl100k_base` throughput unchanged
-  within noise, ordinary and special-token.
+  token is `<|`…`|>` with no inner `|>`. Short lists (`o200k_base`, `cl100k_base`) keep the direct comparison.
+  Old and new builds run alternately on one fixed corpus (ARM64 macOS, background load): ordinary throughput is
+  unchanged within noise (cl100k source count 295/241/285 → 300/253/288 MiB/s for 1 MiB/48 B/256 B chunks). The new
+  `special_tokens` workload measured o200k 271 → 268 MiB/s and cl100k 274 → 271 MiB/s (median of 3), about 1% lower
+  and within the 27 MiB/s spread between runs. `o200k_harmony` special-token encoding runs at about 240 MiB/s,
+  about 10× tiktoken-rs.
 
 ### Changed
 

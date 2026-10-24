@@ -58,7 +58,7 @@ assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
 | Other encodings | `o200k_harmony`: ordinary text only. tiktoken-rs 0.12.0 builds it from the same vocabulary and split pattern as `o200k_base`, so `o200k_base::encode_ordinary` and `count_ordinary` give the same IDs and counts. Its special tokens differ (for example, 200018 is `<\|reserved_200018\|>`, not `<\|endofprompt\|>`), so do not use the special-token APIs for it ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)). The legacy `r50k_base`, `p50k_base` and `p50k_edit` encodings are not implemented ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)). |
 | Special tokens | `o200k_base`: `<\|endoftext\|>` = 199,999, `<\|endofprompt\|>` = 200,018. `cl100k_base`: `<\|endoftext\|>` = 100,257, `<\|fim_prefix\|>` = 100,258, `<\|fim_middle\|>` = 100,259, `<\|fim_suffix\|>` = 100,260, `<\|endofprompt\|>` = 100,276 |
 | Models | Upstream tiktoken (`tiktoken/model.py`) maps GPT-4o, GPT-4.1, GPT-4.5, GPT-5 and o-series names to `o200k_base`; GPT-4, GPT-3.5 Turbo, `davinci-002`, `babbage-002` and `text-embedding-ada-002`/`-3` to `cl100k_base`; and `gpt-oss-*` to `o200k_harmony`. magi-code v0.97.6 also routes `gpt-6-*` and `gpt-6.1-*` (including `gpt-6-astra`) to `o200k_base`; its maintainer validated that routing in magi-code. The library exposes encodings, not a model-name router: model routing stays with the application by decision (see [Model routing](#model-routing)). |
-| Input | `&str` (valid UTF-8). Decoding can return raw bytes for token sequences that are not valid UTF-8. |
+| Input | `&str` (valid UTF-8) by decision; convert other bytes first, for example with `String::from_utf8_lossy` (see [Byte input](#byte-input)). Decoding can return raw bytes for token sequences that are not valid UTF-8. |
 | Platforms | Any Rust target. Tables are emitted in the target's byte order. CI builds on x86_64 and ARM64 Linux, ARM64 macOS, x86_64 and ARM64 Windows, 32-bit i686 Linux and big-endian s390x Linux. Speed and memory were measured only on ARM64 macOS. |
 
 ## Using it in your project
@@ -108,6 +108,25 @@ encodings and does not plan to. Keep the mapping in your application, and pick t
 
 A wrong encoding gives wrong counts without any error. Treat unknown model names as an error, or choose a default
 deliberately; do not fall back silently. The [Scope](#scope) table lists the upstream mappings to start from.
+
+### Byte input
+
+Decision ([#11](https://github.com/magimetal/magi-tokenizer/issues/11)): encoding takes `&str` only, and there is no
+byte-input API. Convert bytes that may not be valid UTF-8 before encoding, usually with `String::from_utf8_lossy`:
+
+- No reference defines tokens for invalid UTF-8 in a public API. tiktoken-rs 0.12.0 encodes only `&str`, and Python
+  tiktoken's `encode` takes `str`. Without a reference, byte-input IDs could not be checked exactly.
+- Python tiktoken's private `_encode_bytes` is a heuristic, not a definition; upstream calls it a "best guess". It
+  splits the valid UTF-8 prefix with the regex, then byte-pair merges that prefix's last piece plus everything from
+  the first invalid byte to the end as one piece. One stray byte near the start of a large input would make the rest
+  one piece, which could reach the slow whole-piece fallback here.
+- Both split patterns are defined over Unicode text. Any other rule for invalid bytes would be this crate's own.
+- Byte input needs more than a new signature: the scanner decodes UTF-8 without validation.
+
+`String::from_utf8_lossy` replaces invalid sequences with U+FFFD the same way as Python's
+`bytes.decode("utf-8", errors="replace")` (checked on truncated, overlong, surrogate and out-of-range sequences), so
+IDs match Python tiktoken for text decoded that way. They do not describe the original bytes: each U+FFFD is the
+three bytes `EF BF BD`, and `decode_bytes` returns those, not the replaced bytes.
 
 ## API
 
@@ -432,6 +451,7 @@ The release profile uses fat LTO and one codegen unit. Build scripts use `opt-le
 - `o200k_harmony` special tokens ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)) and the legacy
   `r50k_base`, `p50k_base` and `p50k_edit` encodings ([#19](https://github.com/magimetal/magi-tokenizer/issues/19))
   are not implemented. Model-name routing is left to applications by design ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)).
+- Encoding takes `&str` only; byte input is left out by decision ([#11](https://github.com/magimetal/magi-tokenizer/issues/11)).
 - The `usize` index path has not been exercised on a real piece of 4 GiB or more.
 - Speed and memory were measured only on ARM64 macOS. CI does not run correctness comparisons; run `bench` locally.
 

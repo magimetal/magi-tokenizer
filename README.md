@@ -271,8 +271,11 @@ Source results differ when using this repository instead of `toks`.
 
 `cl100k_base` count throughput in MiB/s, Rust 1.98.1, this repository's source (`git archive` of `5ac7c1e`), no
 private assets. Over six alternating runs of the pre-change and changed benches, median `o200k_base` throughput
-moved −1.6% to +1.1% per workload (paired runs −3.0% to +1.9%). Source and multilingual workloads were 0.5–1.6%
-slower in the median, smaller than the roughly 10% run-to-run variation noted under [Caveats](#caveats).
+moved −1.6% to +1.1% per workload (paired runs −3.0% to +1.9%). This is code placement, not slower code:
+`count_ordinary` and `encode_ordinary` compile to the same ARM64 instructions as before; only branch, call and
+address targets differ. Elsewhere, 4 instructions differ in the byte comparison that confirms vocabulary tokens
+longer than 12 bytes. Rebuilding both versions with 64-byte function alignment moved the gap to −1.7% to +2.7%, in
+both directions. The bench now also calls each encoding through a function pointer, which moves its timed code too.
 
 | Workload | MiB | magi-tokenizer | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

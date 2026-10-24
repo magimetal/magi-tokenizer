@@ -408,11 +408,14 @@ fn bench(filter: Option<&str>) -> Result<()> {
         ("long_unrepeated", long_unrepeated_pieces()),
         ("random_cjk_ineligible", random_cjk_ineligible()),
     ];
-    if let Some(fixture) = fixture_200k()? {
-        workloads.insert(0, ("fixture_200k", vec![fixture]));
-    }
-    if let Some(snapshots) = session_snapshots()? {
-        workloads.push(("session_snapshots", snapshots.into_iter().step_by(10).collect()));
+    match (fixture_200k()?, session_snapshots()?) {
+        (Some(fixture), Some(snapshots)) => {
+            workloads.insert(0, ("fixture_200k", vec![fixture]));
+            workloads.push(("session_snapshots", snapshots.into_iter().step_by(10).collect()));
+        }
+        _ => eprintln!(
+            "MAGI_TOKENIZER_ASSETS unset: skipping fixture_200k and session_snapshots; a release needs a full run with them"
+        ),
     }
     let selected = |name: &str| filter.is_none_or(|filter| name.contains(filter));
     // Checked but not timed: too slow for tiktoken to time, or measuring a forced path.

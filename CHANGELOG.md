@@ -18,6 +18,9 @@ There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-t
 - README records the decision that model-name routing stays with applications
   ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)), with reasons and guidance for unknown model names.
   The Scope table now lists the full upstream tiktoken mapping, including `gpt-oss-*` → `o200k_harmony`.
+- README records the decision that encoding takes `&str` only ([#11](https://github.com/magimetal/magi-tokenizer/issues/11)):
+  no reference defines tokens for invalid UTF-8 in a public API. Callers convert bytes with `String::from_utf8_lossy`,
+  which replaces invalid sequences as Python's `errors="replace"` does.
 
 ### Added
 

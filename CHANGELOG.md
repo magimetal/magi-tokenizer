@@ -26,6 +26,15 @@ There is no compatibility promise yet ([#13](https://github.com/magimetal/magi-t
 - README records the decision that encoding takes `&str` only ([#11](https://github.com/magimetal/magi-tokenizer/issues/11)):
   no reference defines tokens for invalid UTF-8 in a public API. Callers convert bytes with `String::from_utf8_lossy`,
   which replaces invalid sequences as Python's `errors="replace"` does.
+- More CJK characters start merging as one part ([#14](https://github.com/magimetal/magi-tokenizer/issues/14)):
+  tokens that join only a character's last byte to the next character are checked at runtime against the actual
+  next byte, with a new 4,096-entry table per encoding, instead of at build time against every possible neighbour.
+  Eligible single-token CJK characters (U+4E00–U+9FFF) rose from 1,037 to 2,493 of 2,515 in `o200k_base` and from
+  432 to 546 of 549 in `cl100k_base`. New `bench` workload `random_cjk_ineligible` (240 KB of random CJK, none
+  eligible before) went from 59.9 to 240.5 MiB/s count in `o200k_base` (2.68× bpe-openai, was 0.65×) and from 55.8
+  to 115.7 MiB/s in `cl100k_base` (1.34×, was 0.64×). `o200k_base` `long_unrepeated`, which includes random CJK, rose
+  from 68.6 to 76.0 MiB/s; other workloads stayed within run-to-run variation. Token IDs
+  are unchanged: `bench` exact-ID checks pass for both encodings, including `unicode_sweep` and `forced_fallback`.
 
 ### Added
 

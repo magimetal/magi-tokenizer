@@ -257,6 +257,13 @@ identical with fewer merges. At runtime the byte before must be a continuation b
 multibyte character (or the piece ends there), the only neighbours the build check covers. ASCII-only pieces skip
 the check. Random CJK and Hangul pieces need about a third of the parts.
 
+Tokens that join only a character's last byte to the next character's lead byte are checked at runtime instead,
+against the actual next byte, with a 4,096-entry table of the lowest such token per (continuation, lead) pair. In
+`o200k_base` some token like that ranks below most CJK characters for some lead byte, so a build-time check against
+every possible neighbour marked only 1,037 of 2,515 single-token characters in U+4E00–U+9FFF eligible; now 2,493 are.
+`cl100k_base` went from 432 to 546 of 549. The rest are blocked by a token joining the whole character to a
+neighbour, such as `删除` (rank 39189) below `删` (151816), and need separate bytes for exact results.
+
 #### Long pieces: overlapping windows
 
 Merging a whole piece costs O(n log n) and is slow on repetitive runs such as 300,000 spaces, `aaaa…` or `ababab…`.
@@ -374,6 +381,20 @@ bpe-openai's time, unchanged by that change. `bench` without `toks` or the priva
 count at 137 → 178 MiB/s and `long_unrepeated` at 58 → 69 MiB/s; source and `long_runs` stayed within run-to-run
 variation. The table above predates the change.
 
+The `random_cjk_ineligible` workload tracks the worst case in `bench`: 240 KB of random `些介传你供像力参`, none
+of them eligible in either encoding before the runtime last-byte check. Count throughput in MiB/s, this
+repository's source, no private assets, ARM64 macOS, same bench before and after:
+
+| Encoding | before | after | bpe-openai | after vs bpe-openai |
+| --- | ---: | ---: | ---: | ---: |
+| `o200k_base` | 59.9 | 240.5 | 89.8 | 2.68× |
+| `cl100k_base` | 55.8 | 115.7 | 86.1 | 1.34× |
+
+`cl100k_base` gains less: for 7 of the 8 characters, some token joins the last byte to one of the 6 CJK lead bytes
+below the character's rank, so the character still starts as bytes before that lead byte. `参` stays ineligible
+because `参数` ranks below it. `o200k_base` `long_unrepeated`, which includes random CJK, rose from 68.6 to 76.0
+MiB/s; other workloads stayed within run-to-run variation.
+
 ### Startup
 
 On a contended machine, the first count took 0.107 ms, versus 166 ms for tiktoken-rs and 78 ms for bpe-openai's
@@ -396,7 +417,7 @@ cargo run --release -p magi-tokenizer-bench -- startup magi     # or tiktoken, b
 - `fixture_200k` and `session_snapshots` require `MAGI_TOKENIZER_ASSETS` (see [Development](#development)). Without
   it, they are skipped. Session transcripts are private and unpublished, so others cannot reproduce that row.
 - Source workloads read the first 1 MiB (`source_1MiB`) or 256 KiB (chunked workloads) from `MAGI_TOKENIZER_SOURCE`.
-- The random CJK probe is not in this repository.
+- The random CJK probe in the first table is not in this repository; `random_cjk_ineligible` is.
 - The bench enables `harness`. A quick check on source text, long runs and random `a`/`b` found count throughput
   unchanged within run-to-run variation when that feature was disabled.
 

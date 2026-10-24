@@ -22,6 +22,9 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
   (32 at 4 GiB and above), once, in O(n log n) time. Peak RSS on a forced 64 MiB fallback fell from 1,750 MB to
   1,414 MB and time from 13.6 s to 11.8 s; window timings are unchanged. Token IDs are unchanged: `bench` exact-ID
   checks pass for both encodings, including `forced_fallback`. There is still no memory-limit setting.
+- Release step for private inputs ([#17](https://github.com/magimetal/magi-tokenizer/issues/17)): README
+  "Releasing" requires a full, unfiltered `bench` run with `MAGI_TOKENIZER_ASSETS` set before each publish, since CI
+  cannot check `fixture_200k` or `session_snapshots`. `bench` now prints a notice to stderr when it skips them.
 
 - Short-piece speedups for both encodings ([#8](https://github.com/magimetal/magi-tokenizer/issues/8)): one- and
   two-byte pieces skip the vocabulary hash table, merges of pieces under 32 bytes shift parts with a loop instead

@@ -498,9 +498,22 @@ Optional harness inputs:
 - `MAGI_TOKENIZER_SOURCE`: source trees in platform path-list syntax. Defaults to this repository. Dot-directories
   and `target` are skipped, with at most about 4 MiB read per tree.
 - `MAGI_TOKENIZER_ASSETS`: directory containing `o200k_base-200k.txt` and `session-compacted-500.json`. Unset skips
-  those suites. A missing or malformed file when set fails the command.
+  those suites and prints a notice to stderr. A missing or malformed file when set fails the command.
 
 The release profile uses fat LTO and one codegen unit. Build scripts use `opt-level = 3` for fast debug table generation.
+
+### Releasing
+
+CI builds and runs clippy only; it runs no exact-ID checks. `fixture_200k` and `session_snapshots` use private
+files CI cannot read. Before each `cargo publish`, run the full `bench` on the release commit with both inputs set,
+with no filter:
+
+```sh
+MAGI_TOKENIZER_ASSETS=/path/to/assets cargo run --release -p magi-tokenizer-bench -- bench
+```
+
+Publish only if it completes with no failed check and its output lists `fixture_200k` and `session_snapshots` rows
+for both encodings. Record the release commit and that the run passed in the `CHANGELOG.md` entry for the version.
 
 ## Known limitations
 

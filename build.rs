@@ -13,11 +13,41 @@ use std::{env, fs};
 mod table_hash;
 use table_hash::*;
 
-/// A vocabulary to build: name, enabling Cargo feature (None = always built), expected ordinary token and merge
-/// pair counts. Token ids must fit the 18-bit pair-table field.
-const VOCABULARIES: [(&str, Option<&str>, usize, usize); 2] = [
-    ("o200k_base", None, 199_998, 446_189),
-    ("cl100k_base", Some("CL100K_BASE"), 100_256, 233_378),
+/// A vocabulary to build from `assets/<name>.tiktoken`. Token ids must fit the 18-bit pair-table field.
+struct VocabularySpec {
+    name: &'static str,
+    /// Enabling Cargo feature, as in `CARGO_FEATURE_<feature>`; None when always built.
+    feature: Option<&'static str>,
+    /// Expected number of ordinary tokens and of merge pairs.
+    token_count: usize,
+    pair_count: usize,
+    /// Ranks below the highest that have no token, such as `p50k_base`'s 50256 (its `<|endoftext|>`).
+    missing_ranks: &'static [usize],
+}
+
+const VOCABULARIES: [VocabularySpec; 4] = [
+    VocabularySpec { name: "o200k_base", feature: None, token_count: 199_998, pair_count: 446_189, missing_ranks: &[] },
+    VocabularySpec {
+        name: "cl100k_base",
+        feature: Some("CL100K_BASE"),
+        token_count: 100_256,
+        pair_count: 233_378,
+        missing_ranks: &[],
+    },
+    VocabularySpec {
+        name: "r50k_base",
+        feature: Some("R50K_BASE"),
+        token_count: 50_256,
+        pair_count: 108_299,
+        missing_ranks: &[],
+    },
+    VocabularySpec {
+        name: "p50k_base",
+        feature: Some("P50K_BASE"),
+        token_count: 50_280,
+        pair_count: 108_599,
+        missing_ranks: &[50_256],
+    },
 ];
 /// `PREMERGED_CHAR_TOKENS` has one entry per code point below this: every 2- and 3-byte UTF-8 character.
 const PREMERGED_CHAR_COUNT: usize = 0x10000;
@@ -27,9 +57,9 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let little_endian = env::var("CARGO_CFG_TARGET_ENDIAN").expect("CARGO_CFG_TARGET_ENDIAN") == "little";
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    for (name, feature, expected_token_count, expected_pair_count) in VOCABULARIES {
-        if feature.is_none_or(|feature| env::var_os(format!("CARGO_FEATURE_{feature}")).is_some()) {
-            build_vocabulary(name, expected_token_count, expected_pair_count, little_endian, &out_dir);
+    for spec in &VOCABULARIES {
+        if spec.feature.is_none_or(|feature| env::var_os(format!("CARGO_FEATURE_{feature}")).is_some()) {
+            build_vocabulary(spec, little_endian, &out_dir);
         }
     }
     write_o200k_harmony_special_tokens(&out_dir);
@@ -72,26 +102,23 @@ fn write_o200k_harmony_special_tokens(out_dir: &Path) {
     fs::write(out_dir.join("o200k_harmony_special_tokens.rs"), source).expect("write o200k_harmony special tokens");
 }
 
-fn build_vocabulary(
-    name: &str,
-    expected_token_count: usize,
-    expected_pair_count: usize,
-    little_endian: bool,
-    out_dir: &Path,
-) {
+fn build_vocabulary(spec: &VocabularySpec, little_endian: bool, out_dir: &Path) {
+    let name = spec.name;
     let vocabulary_path = format!("assets/{name}.tiktoken");
     println!("cargo:rerun-if-changed={vocabulary_path}");
     let vocabulary = fs::read_to_string(&vocabulary_path).expect("read vocabulary");
-    let tokens = parse_tiktoken_vocabulary(&vocabulary);
-    assert_eq!(tokens.len(), expected_token_count, "unexpected {name} vocabulary size");
+    // Indexed by id; missing ranks are empty.
+    let tokens = parse_tiktoken_vocabulary(&vocabulary, spec.missing_ranks);
+    assert_eq!(tokens.len() - spec.missing_ranks.len(), spec.token_count, "unexpected {name} vocabulary size");
     assert!(tokens.len() < 1 << PAIR_ID_BITS);
 
     let mut id_by_bytes: HashMap<&[u8], u32> = HashMap::with_capacity(tokens.len());
-    for (id, bytes) in tokens.iter().enumerate() {
-        assert!(!bytes.is_empty() && bytes.len() <= MAX_TOKEN_BYTES, "token {id} has length {}", bytes.len());
+    for (id, bytes) in tokens.iter().enumerate().filter(|(_, bytes)| !bytes.is_empty()) {
+        assert!(bytes.len() <= MAX_TOKEN_BYTES, "token {id} has length {}", bytes.len());
         assert!(id_by_bytes.insert(bytes, id as u32).is_none(), "token {id} duplicates another token");
     }
 
+    // A missing rank gets an empty span.
     let mut token_bytes = Vec::new();
     let mut token_offsets = Vec::with_capacity(tokens.len() + 1);
     for bytes in &tokens {
@@ -101,11 +128,11 @@ fn build_vocabulary(
     token_offsets.push(token_bytes.len() as u32);
 
     // Library probe loops end at an empty slot, so each table keeps at least half its slots empty.
-    let vocab_table_bits = table_bits_for(tokens.len());
-    let pair_table_bits = table_bits_for(expected_pair_count);
+    let vocab_table_bits = table_bits_for(spec.token_count);
+    let pair_table_bits = table_bits_for(spec.pair_count);
     let vocab_table = build_vocab_table(&tokens, vocab_table_bits);
     let (pair_table, pair_count) = build_pair_table(&tokens, &id_by_bytes, pair_table_bits);
-    assert_eq!(pair_count, expected_pair_count, "unexpected {name} merge pair count");
+    assert_eq!(pair_count, spec.pair_count, "unexpected {name} merge pair count");
 
     let byte_tokens: Vec<u32> = (0..=255u8).map(|byte| id_by_bytes[&[byte][..]]).collect();
     let byte_pair_ranks: Vec<u32> = (0..65536u32)
@@ -125,7 +152,8 @@ fn build_vocabulary(
 
     let mut source = String::new();
     writeln!(source, "// @generated by build.rs from {vocabulary_path}. Do not edit.").unwrap();
-    writeln!(source, "pub(crate) const TOKEN_COUNT: usize = {};", tokens.len()).unwrap();
+    writeln!(source, "pub(crate) const TOKEN_COUNT: usize = {};", spec.token_count).unwrap();
+    writeln!(source, "pub(crate) const ORDINARY_ID_END: usize = {};", tokens.len()).unwrap();
     writeln!(source, "pub(crate) const TOKEN_BYTES_LEN: usize = {};", token_bytes.len()).unwrap();
     writeln!(source, "pub(crate) const VOCAB_TABLE_BITS: u32 = {vocab_table_bits};").unwrap();
     writeln!(source, "pub(crate) const PAIR_TABLE_BITS: u32 = {pair_table_bits};").unwrap();
@@ -163,7 +191,9 @@ fn table_bits_for(entries: usize) -> u32 {
     (2 * entries).next_power_of_two().trailing_zeros()
 }
 
-fn parse_tiktoken_vocabulary(text: &str) -> Vec<Vec<u8>> {
+/// Token bytes indexed by rank. Ranks in `missing_ranks` must be absent and stay empty; every other rank up to the
+/// highest must be present and non-empty.
+fn parse_tiktoken_vocabulary(text: &str, missing_ranks: &[usize]) -> Vec<Vec<u8>> {
     let mut by_rank: Vec<Option<Vec<u8>>> = Vec::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
         let (encoded, rank) = line.split_once(' ').expect("vocabulary line is `<base64> <rank>`");
@@ -176,7 +206,17 @@ fn parse_tiktoken_vocabulary(text: &str) -> Vec<Vec<u8>> {
     by_rank
         .into_iter()
         .enumerate()
-        .map(|(rank, bytes)| bytes.unwrap_or_else(|| panic!("missing rank {rank}")))
+        .map(|(rank, bytes)| match bytes {
+            Some(bytes) => {
+                assert!(!missing_ranks.contains(&rank), "rank {rank} should be missing");
+                assert!(!bytes.is_empty(), "token {rank} is empty");
+                bytes
+            }
+            None => {
+                assert!(missing_ranks.contains(&rank), "missing rank {rank}");
+                Vec::new()
+            }
+        })
         .collect()
 }
 
@@ -217,7 +257,7 @@ fn inline_key(bytes: &[u8]) -> (u64, u32) {
 fn build_vocab_table(tokens: &[Vec<u8>], table_bits: u32) -> Vec<u64> {
     let mask = (1usize << table_bits) - 1;
     let mut table = vec![0u64; 2 << table_bits];
-    for (id, bytes) in tokens.iter().enumerate() {
+    for (id, bytes) in tokens.iter().enumerate().filter(|(_, bytes)| !bytes.is_empty()) {
         let (head, tail) = inline_key(bytes);
         let mut slot = vocab_slot_for(head, tail, bytes.len(), table_bits);
         while table[2 * slot + 1] != 0 {

@@ -8,6 +8,26 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
 
 ### Added
 
+- `r50k_base`, `p50k_base` and `p50k_edit` encodings ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)):
+  modules `magi_tokenizer::r50k_base` (feature `r50k_base`), `magi_tokenizer::p50k_base` and
+  `magi_tokenizer::p50k_edit` (both feature `p50k_base`, sharing one set of tables), with the same functions as the
+  other encodings. A third hand-written scanner covers their shared split pattern (case-sensitive contractions,
+  ` ?` prefixed runs of any length, `\s++$`). `build.rs` now accepts declared missing ranks, for `p50k_base`'s hole at
+  50256 (`<|endoftext|>`); `token_bytes` and `decode` return the special token there. Special tokens:
+  `END_OF_TEXT` = 50256 in all three; `p50k_edit` adds `FIM_PREFIX`/`FIM_MIDDLE`/`FIM_SUFFIX` = 50281–50283.
+- `bench` checks `r50k_base`, `p50k_base` and `p50k_edit` exact IDs, counts, decoding, allow-lists and
+  disallowed-special errors against tiktoken-rs 0.12.0 on every workload, `unicode_sweep` and `forced_fallback`
+  included. bpe-openai has none of them, so `r50k`/`p50k` are timed against tiktoken-rs only, and `p50k_edit`'s
+  ordinary workloads are checked, not timed. Measured (ARM64 macOS, this repository's source): `r50k` count 289 MiB/s
+  on 1 MiB of source (17.8× tiktoken-rs), 1,171 MiB/s on long runs (50×); `p50k` 281 MiB/s (17.9×) and 1,157 MiB/s
+  (73×).
+- Costs ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)), stripped fat-LTO program counting one
+  string, Apple M5 Pro: calling `r50k_base` or `p50k_base` adds 5.3 MB (20.1 → 25.4 MB), both 10.4 MB; enabling a
+  feature without calling it adds nothing. Clean release build 3.3 s → 3.8 s with one feature enabled, 3.9 s with
+  one called, 4.6 s with both called (median of three). `o200k_base` and `cl100k_base` throughput is unchanged
+  within noise in interleaved runs against `e4543bc` on one fixed corpus (cl100k source count
+  307/294/257 → 306/291/256 MiB/s for 1 MiB/256 B/48 B chunks, four rounds each).
+
 - `o200k_harmony` encoding (`gpt-oss-*`) ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)): module
   `magi_tokenizer::o200k_harmony` with the same functions as the other encodings. It reuses `o200k_base`'s scanner
   and tables, so ordinary IDs are identical; its 1,090 special tokens (IDs 199,998–201,087, named tokens plus

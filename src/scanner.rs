@@ -20,6 +20,16 @@
 // | \s+(?!\S)
 // | \s
 //
+// r50k_base, p50k_base and p50k_edit:
+//
+//   '(?:[sdmt]|ll|ve|re)
+// |  ?\p{L}++
+// |  ?\p{N}++
+// |  ?[^\s\p{L}\p{N}]++
+// | \s++$
+// | \s+(?!\S)
+// | \s
+//
 // Matching order and backtracking follow the scanner design of toks (Apache-2.0, Copyright 2026 Actual
 // Computer Inc.), src/core/k3_o200k_c.c and src/core/kernels.h, rewritten in Rust for magi-tokenizer.
 // Atoms are Unicode scalars; input is valid UTF-8 because callers pass `&str`.
@@ -49,6 +59,18 @@ impl Scanner for Cl100kScanner {
     #[inline(always)]
     fn piece_end(text: &[u8], pos: usize) -> usize {
         cl100k_piece_end(text, pos)
+    }
+}
+
+/// Scanner of `r50k_base`, `p50k_base` and `p50k_edit`, which share one pattern.
+#[cfg(any(feature = "r50k_base", feature = "p50k_base"))]
+pub(crate) struct R50kScanner;
+
+#[cfg(any(feature = "r50k_base", feature = "p50k_base"))]
+impl Scanner for R50kScanner {
+    #[inline(always)]
+    fn piece_end(text: &[u8], pos: usize) -> usize {
+        r50k_piece_end(text, pos)
     }
 }
 
@@ -344,6 +366,61 @@ fn cl100k_whitespace_end(text: &[u8], pos: usize) -> usize {
     } else {
         last_start
     }
+}
+
+/// End of the r50k_base piece that starts at `pos` (`pos < text.len()`). p50k_base and p50k_edit use the same
+/// pattern.
+#[cfg(any(feature = "r50k_base", feature = "p50k_base"))]
+#[inline(always)]
+fn r50k_piece_end(text: &[u8], pos: usize) -> usize {
+    let (class, scalar, first_len) = atom_at(text, pos);
+    let second = pos + first_len;
+    let end = match class & BASE_MASK {
+        base @ (LETTER | NUMBER) => base_run_end(text, second, base),
+        PUNCTUATION => {
+            let contraction = case_sensitive_contraction_end(text, pos);
+            if contraction > pos { contraction } else { base_run_end(text, second, PUNCTUATION) }
+        }
+        // ` ?` is U+0020 only: it prefixes a letter, number or punctuation run.
+        SPACE if scalar == 0x20 && second < text.len() => {
+            let (second_class, second_len) = class_at(text, second);
+            match second_class & BASE_MASK {
+                base @ (LETTER | NUMBER | PUNCTUATION) => base_run_end(text, second + second_len, base),
+                _ => r50k_whitespace_end(text, pos),
+            }
+        }
+        _ => r50k_whitespace_end(text, pos),
+    };
+    // Every alternative above ends past `pos`; the guard keeps the scan loop finite regardless.
+    if end > pos { end } else { second }
+}
+
+/// End of the case-sensitive `'(?:[sdmt]|ll|ve|re)` at `pos`, or `pos` when no contraction starts there.
+#[cfg(any(feature = "r50k_base", feature = "p50k_base"))]
+#[inline(always)]
+fn case_sensitive_contraction_end(text: &[u8], pos: usize) -> usize {
+    match &text[pos..] {
+        [b'\'', b's' | b'd' | b'm' | b't', ..] => pos + 2,
+        [b'\'', b'l', b'l', ..] | [b'\'', b'v' | b'r', b'e', ..] => pos + 3,
+        _ => pos,
+    }
+}
+
+/// `\s++$|\s+(?!\S)|\s` at `pos`.
+#[cfg(any(feature = "r50k_base", feature = "p50k_base"))]
+#[inline(always)]
+fn r50k_whitespace_end(text: &[u8], pos: usize) -> usize {
+    let mut end = pos;
+    let mut last_start = pos;
+    while end < text.len() {
+        let (class, len) = class_at(text, end);
+        if !matches!(class & BASE_MASK, SPACE | NEWLINE) {
+            break;
+        }
+        last_start = end;
+        end += len;
+    }
+    if end == text.len() || last_start == pos { end } else { last_start }
 }
 
 /// Iterator over pretokenized pieces of a string, for the encoding that produced it.

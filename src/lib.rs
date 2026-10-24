@@ -1,5 +1,5 @@
-//! Exact, fast tokenizers for OpenAI's `o200k_base`, `o200k_harmony` and (feature `cl100k_base`) `cl100k_base`
-//! encodings.
+//! Exact, fast tokenizers for OpenAI's `o200k_base`, `o200k_harmony` and, behind features of the same name,
+//! `cl100k_base`, `r50k_base` and `p50k_base` (which also enables `p50k_edit`) encodings.
 //!
 //! Token ids are identical to tiktoken's (`encode_ordinary`, `encode_with_special_tokens`, and `encode` with an
 //! allow-list). Each encoding is a module with the same functions; the crate root re-exports [`o200k_base`]. Tables
@@ -28,7 +28,8 @@ macro_rules! encoding_api {
 
         const SPECIAL: crate::SpecialTokens = crate::SpecialTokens::new(&SPECIAL_TOKENS, SPECIAL_TOKEN_TEXT_ORDER);
 
-        /// Number of ordinary (non-special) tokens; ordinary ids are `0..ORDINARY_TOKEN_COUNT`.
+        /// Number of ordinary (non-special) tokens. Their ids are `0..ORDINARY_TOKEN_COUNT`, except in `p50k_base`
+        /// and `p50k_edit`, where id 50256 is `<|endoftext|>` and ordinary ids run to 50280.
         pub const ORDINARY_TOKEN_COUNT: usize = <$vocabulary as crate::Vocabulary>::TOKEN_COUNT;
 
         #[doc = concat!("Splits `text` into the pieces the ", $name, " pretokenization regex produces.")]
@@ -177,6 +178,59 @@ pub mod cl100k_base {
     encoding_api!("cl100k_base", crate::scanner::Cl100kScanner, crate::tables::Cl100kBaseVocabulary);
 }
 
+/// `r50k_base` (also called `gpt2`): GPT-2 and GPT-3 models such as `davinci`. Requires feature `r50k_base`.
+#[cfg(feature = "r50k_base")]
+pub mod r50k_base {
+    /// `<|endoftext|>` in `r50k_base`.
+    pub const END_OF_TEXT: u32 = 50_256;
+    /// Special tokens of `r50k_base`, as (text, id).
+    pub const SPECIAL_TOKENS: [(&str, u32); 1] = [("<|endoftext|>", END_OF_TEXT)];
+    /// Short list: special-token lookup scans it.
+    const SPECIAL_TOKEN_TEXT_ORDER: &[u16] = &[];
+
+    encoding_api!("r50k_base", crate::scanner::R50kScanner, crate::tables::R50kBaseVocabulary);
+}
+
+/// `p50k_base`: Codex models, `text-davinci-002` and `text-davinci-003`. Requires feature `p50k_base`. Its 50,280
+/// ordinary tokens are `r50k_base`'s plus 24 runs of spaces, ids 50257–50280; id 50256 is `<|endoftext|>`.
+#[cfg(feature = "p50k_base")]
+pub mod p50k_base {
+    /// `<|endoftext|>` in `p50k_base`.
+    pub const END_OF_TEXT: u32 = 50_256;
+    /// Special tokens of `p50k_base`, as (text, id).
+    pub const SPECIAL_TOKENS: [(&str, u32); 1] = [("<|endoftext|>", END_OF_TEXT)];
+    /// Short list: special-token lookup scans it.
+    const SPECIAL_TOKEN_TEXT_ORDER: &[u16] = &[];
+
+    encoding_api!("p50k_base", crate::scanner::R50kScanner, crate::tables::P50kBaseVocabulary);
+}
+
+/// `p50k_edit`: edit models such as `text-davinci-edit-001` and `code-davinci-edit-001`. Same vocabulary and
+/// pretokenization as `p50k_base`, so ordinary encoding and counting give the same ids; adds fill-in-the-middle
+/// special tokens. Requires feature `p50k_base` and shares its tables.
+#[cfg(feature = "p50k_base")]
+pub mod p50k_edit {
+    /// `<|endoftext|>` in `p50k_edit`.
+    pub const END_OF_TEXT: u32 = 50_256;
+    /// `<|fim_prefix|>` in `p50k_edit`.
+    pub const FIM_PREFIX: u32 = 50_281;
+    /// `<|fim_middle|>` in `p50k_edit`.
+    pub const FIM_MIDDLE: u32 = 50_282;
+    /// `<|fim_suffix|>` in `p50k_edit`.
+    pub const FIM_SUFFIX: u32 = 50_283;
+    /// Special tokens of `p50k_edit`, as (text, id).
+    pub const SPECIAL_TOKENS: [(&str, u32); 4] = [
+        ("<|endoftext|>", END_OF_TEXT),
+        ("<|fim_prefix|>", FIM_PREFIX),
+        ("<|fim_middle|>", FIM_MIDDLE),
+        ("<|fim_suffix|>", FIM_SUFFIX),
+    ];
+    /// Short list: special-token lookup scans it.
+    const SPECIAL_TOKEN_TEXT_ORDER: &[u16] = &[];
+
+    encoding_api!("p50k_edit", crate::scanner::R50kScanner, crate::tables::P50kBaseVocabulary);
+}
+
 #[inline]
 fn encode_scanned_into<S: Scanner, V: Vocabulary>(text: &str, tokens: &mut Vec<u32>) {
     for piece in ScannedPieces::<S>::new(text) {
@@ -308,9 +362,10 @@ fn reject_disallowed_special(
 }
 
 fn token_bytes_in<V: Vocabulary>(id: u32, special: &SpecialTokens) -> Option<&'static [u8]> {
-    if (id as usize) < V::TOKEN_COUNT {
-        Some(tables::ordinary_token_bytes::<V>(id))
-    } else {
-        special.text_of(id).map(str::as_bytes)
+    // Ids below ORDINARY_ID_END without an ordinary token have empty bytes; they may be special (p50k_base's 50256).
+    let ordinary = ((id as usize) < V::ORDINARY_ID_END).then(|| tables::ordinary_token_bytes::<V>(id));
+    match ordinary {
+        Some(bytes) if !bytes.is_empty() => Some(bytes),
+        _ => special.text_of(id).map(str::as_bytes),
     }
 }

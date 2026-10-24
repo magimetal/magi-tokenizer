@@ -16,9 +16,10 @@ src/core/kernels.h (revision 2ebc390), rewritten in Rust.
 
 --------------------------------------------------------------------------------
 tiktoken
-assets/o200k_base.tiktoken and assets/cl100k_base.tiktoken are the o200k_base
-and cl100k_base vocabularies published by OpenAI with tiktoken, distributed
-under the MIT License:
+assets/o200k_base.tiktoken, assets/cl100k_base.tiktoken,
+assets/r50k_base.tiktoken and assets/p50k_base.tiktoken are the o200k_base,
+cl100k_base, r50k_base and p50k_base vocabularies published by OpenAI with
+tiktoken, distributed under the MIT License:
 
 MIT License
 

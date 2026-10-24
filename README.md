@@ -5,7 +5,7 @@ A fast Rust tokenizer for OpenAI's `o200k_base` and `o200k_harmony` encodings, p
 It produces the same token IDs as [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary`,
 `encode_with_special_tokens` and `encode` with an allow-list of special tokens.
 
-Experimental, version 0.0.2. From 0.1.0, releases follow the [compatibility policy](#compatibility). No automated
+Version 0.1.0. Releases follow the [compatibility policy](#compatibility). No automated
 correctness suite is included. See [Known limitations](#known-limitations) and
 [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues).
 
@@ -15,7 +15,7 @@ Add the crate from [crates.io](https://crates.io/crates/magi-tokenizer):
 
 ```toml
 [dependencies]
-magi-tokenizer = "=0.0.2"
+magi-tokenizer = "0.1"
 ```
 
 ```rust
@@ -43,7 +43,7 @@ and table pages loaded on demand (see [Startup](#startup)).
 `cl100k_base` (GPT-4, GPT-3.5 Turbo, `text-embedding-*`) is opt-in:
 
 ```toml
-magi-tokenizer = { version = "=0.0.2", features = ["cl100k_base"] }
+magi-tokenizer = { version = "0.1", features = ["cl100k_base"] }
 ```
 
 ```rust
@@ -56,7 +56,7 @@ The legacy GPT-2/GPT-3 encodings are opt-in too: feature `r50k_base` for `r50k_b
 `p50k_base` for `p50k_base` and `p50k_edit`, which share one vocabulary:
 
 ```toml
-magi-tokenizer = { version = "=0.0.2", features = ["r50k_base", "p50k_base"] }
+magi-tokenizer = { version = "0.1", features = ["r50k_base", "p50k_base"] }
 ```
 
 ```rust
@@ -85,8 +85,8 @@ assert_eq!(ids[0], o200k_harmony::START);
 
 ## Using it in your project
 
-- Pin 0.0.x releases exactly (`=0.0.2`) and commit `Cargo.lock`: they have no compatibility promise. From 0.1.0,
-  the [compatibility policy](#compatibility) applies. Changes are listed in [CHANGELOG.md](CHANGELOG.md). For git
+- `magi-tokenizer = "0.1"` takes only compatible releases under the [compatibility policy](#compatibility). 0.0.x
+  releases have no promise: pin them exactly (`=0.0.2`). Changes are listed in [CHANGELOG.md](CHANGELOG.md). For git
   dependencies, pin a full commit hash whose CI passed. Do not enable `harness`: it exposes memory-benchmark hooks
   for `bench/` and is outside the policy.
 - Special-token modes ([#10](https://github.com/magimetal/magi-tokenizer/issues/10)):
@@ -122,8 +122,8 @@ assert_eq!(ids[0], o200k_harmony::START);
 
 ### Compatibility
 
-Decision ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)): the policy starts with 0.1.0, the next
-release. 0.0.1 and 0.0.2 carry no promise. From 0.1.0, versions follow Cargo's SemVer rules: a release that breaks
+Decision ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)): the policy starts with 0.1.0. 0.0.1 and
+0.0.2 carry no promise. From 0.1.0, versions follow Cargo's SemVer rules: a release that breaks
 a promise below gets a new minor version (0.1 → 0.2), which Cargo treats as incompatible; a patch release
 (0.1.0 → 0.1.1) keeps every promise. A plain `magi-tokenizer = "0.1"` requirement then takes only compatible releases.
 
@@ -238,14 +238,14 @@ These three implementations compute them differently:
 
 | Stage | tiktoken-rs | bpe-openai | magi-tokenizer |
 | --- | --- | --- | --- |
-| Vocabulary setup | Decoded and hashed at run time (166 ms first call) | Built at run time (78 ms first call) | Built by `build.rs` into embedded hash tables; nothing runs at start (0.1 ms first call) |
+| Vocabulary setup | Decoded and hashed at run time (37 ms first call) | Built at run time (23 ms first call) | Built by `build.rs` into embedded hash tables; nothing runs at start (0.014 ms first call) |
 | Pretokenizer | `fancy-regex` with lookahead | `regex-automata` with a lookahead workaround | Hand-written scanner (derived from `toks`) with Unicode 16 classes generated from the same `regex` crate version as the reference |
 | Short pieces | Rescans all pair ranks after each merge | Backtracking search over Aho-Corasick automata of the vocabulary | Stack arrays, no allocation; packed rank+position keys with per-block minimums |
-| Long pieces | Same rescan: cost grows with the square of the length (15 MiB/s on long runs) | Same backtracking search | Overlapping windows, stitched and cached (954 MiB/s on long runs) |
+| Long pieces | Same rescan: cost grows with the square of the length (14 MiB/s on long runs) | Same backtracking search | Overlapping windows, stitched and cached (924 MiB/s on long runs) |
 | Counting | Encodes, then takes the length | Separate count function | Separate count function; long pieces counted in bounded memory |
 
-On source code, transcripts and the shared fixture, magi-tokenizer is about 6× faster than tiktoken-rs and 3×
-faster than bpe-openai. Cached windows make long runs about 64× and 5.6× faster, respectively. Counting avoids
+On source code, transcripts and the shared fixture, `o200k_base` counting is about 7× faster than tiktoken-rs and
+3.3× faster than bpe-openai. Cached windows make long runs about 66× and 5.7× faster, respectively. Counting avoids
 storing output tokens. These results exclude the whole-piece fallback.
 
 It covers the same OpenAI encodings as tiktoken-rs; bpe-openai has no `r50k_base`, `p50k_base` or `p50k_edit`.
@@ -401,41 +401,64 @@ a stray `<|endof`) times `encode_with_special_tokens` and `count_with_special_to
 encoding. `p50k_edit` (rows `p50k_edit/...`) is handled like Harmony: its ordinary encoding is `p50k_base`'s, so its
 ordinary workloads are checked but not timed.
 
-Count throughput in MiB/s, commit `629e2e6` (library code as in `49b9a29`), Rust 1.98.1, `toks` source and both private assets:
+Count throughput in MiB/s, commit `7e90235`, Rust 1.98.1, Apple M5 Pro, `toks` source (revision `2ebc390`) and both
+private assets. Speedups use unrounded figures.
 
 | Workload | MiB | magi-tokenizer | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `fixture_200k` | 0.895 | 256.3 | 39.9 | 90.0 | 6.42× | 2.85× |
-| `source_1MiB` | 1.000 | 212.7 | 33.8 | 65.0 | 6.30× | 3.27× |
-| `source_48B_chunks` | 0.250 | 183.1 | 28.5 | 52.9 | 6.43× | 3.46× |
-| `source_256B_chunks` | 0.250 | 207.5 | 31.8 | 63.0 | 6.54× | 3.30× |
-| `multilingual` | 0.468 | 137.2 | 44.2 | 100.0 | 3.10× | 1.37× |
-| `long_runs` | 1.678 | 953.7 | 14.9 | 170.5 | 64.16× | 5.59× |
-| `long_unrepeated` | 0.680 | 57.7 | 14.9 | 45.2 | 3.88× | 1.28× |
-| `session_snapshots` | 30.748 | 256.9 | 40.9 | 86.1 | 6.28× | 2.98× |
+| `fixture_200k` | 0.895 | 252.2 | 38.5 | 76.8 | 6.55× | 3.29× |
+| `source_1MiB` | 1.000 | 228.2 | 32.7 | 62.4 | 6.99× | 3.66× |
+| `source_48B_chunks` | 0.250 | 199.9 | 27.4 | 54.6 | 7.29× | 3.66× |
+| `source_256B_chunks` | 0.250 | 242.2 | 31.1 | 59.5 | 7.78× | 4.07× |
+| `multilingual` | 0.468 | 207.1 | 41.9 | 97.4 | 4.94× | 2.13× |
+| `scanner_edges` | 0.262 | 81.5 | 17.1 | 42.4 | 4.76× | 1.92× |
+| `long_runs` | 1.678 | 924.4 | 14.0 | 163.4 | 66.03× | 5.66× |
+| `long_unrepeated` | 0.680 | 76.1 | 15.0 | 44.7 | 5.07× | 1.70× |
+| `random_cjk_ineligible` | 0.229 | 245.2 | 22.6 | 90.6 | 10.84× | 2.71× |
+| `session_snapshots` | 30.748 | 273.3 | 39.6 | 83.2 | 6.90× | 3.28× |
+| `special_tokens` | 0.271 | 223.6 | 32.7 | – | 6.84× | – |
 
-Encode was 3.02 to 6.49× faster than tiktoken-rs and 1.25 to 3.63× faster than bpe-openai, except on `long_runs`
-(65.15× and 6.04×). An immediate second run kept magi count within 4%. bpe-openai ratios moved more:
-`fixture_200k` count went from 2.85× to 3.10×, within the roughly 10% variation noted under [Caveats](#caveats).
-Source results differ when using this repository instead of `toks`.
+Encode was 4.14 to 10.70× faster than tiktoken-rs and 1.72 to 4.09× faster than bpe-openai, except on `long_runs`
+(65.79× and 5.94×). Source results differ when using this repository instead of `toks`.
 
-`cl100k_base` count throughput in MiB/s, Rust 1.98.1, this repository's source (`git archive` of `5ac7c1e`), no
-private assets. Over six alternating runs of the pre-change and changed benches, median `o200k_base` throughput
-moved −1.6% to +1.1% per workload (paired runs −3.0% to +1.9%). This is code placement, not slower code:
-`count_ordinary` and `encode_ordinary` compile to the same ARM64 instructions as before; only branch, call and
-address targets differ. Elsewhere, 4 instructions differ in the byte comparison that confirms vocabulary tokens
-longer than 12 bytes. Rebuilding both versions with 64-byte function alignment moved the gap to −1.7% to +2.7%, in
-both directions. The bench now also calls each encoding through a function pointer, which moves its timed code too.
+`cl100k_base` count throughput in MiB/s, same run:
 
 | Workload | MiB | magi-tokenizer | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `source_1MiB` | 0.218 | 250.8 | 12.7 | 51.3 | 19.75× | 4.88× |
-| `source_48B_chunks` | 0.218 | 223.3 | 11.6 | 48.5 | 19.26× | 4.61× |
-| `source_256B_chunks` | 0.218 | 243.3 | 12.4 | 50.8 | 19.59× | 4.79× |
-| `multilingual` | 0.468 | 176.8 | 28.3 | 90.4 | 6.25× | 1.96× |
-| `scanner_edges` | 0.262 | 81.3 | 11.6 | 41.6 | 7.03× | 1.96× |
-| `long_runs` | 1.678 | 1005.9 | 14.5 | 120.1 | 69.57× | 8.38× |
-| `long_unrepeated` | 0.680 | 68.9 | 14.3 | 44.8 | 4.82× | 1.54× |
+| `fixture_200k` | 0.895 | 223.7 | 25.6 | 86.9 | 8.75× | 2.57× |
+| `source_1MiB` | 1.000 | 244.6 | 21.3 | 66.2 | 11.48× | 3.70× |
+| `source_48B_chunks` | 0.250 | 202.8 | 18.3 | 58.8 | 11.05× | 3.45× |
+| `source_256B_chunks` | 0.250 | 246.2 | 20.3 | 62.1 | 12.13× | 3.96× |
+| `multilingual` | 0.468 | 215.0 | 28.3 | 91.4 | 7.59× | 2.35× |
+| `scanner_edges` | 0.262 | 94.7 | 11.9 | 42.4 | 7.97× | 2.24× |
+| `long_runs` | 1.678 | 992.8 | 15.9 | 120.9 | 62.52× | 8.21× |
+| `long_unrepeated` | 0.680 | 84.9 | 16.2 | 46.3 | 5.23× | 1.83× |
+| `random_cjk_ineligible` | 0.229 | 118.2 | 22.1 | 86.3 | 5.36× | 1.37× |
+| `session_snapshots` | 30.748 | 229.4 | 26.2 | 86.4 | 8.76× | 2.65× |
+| `special_tokens` | 0.271 | 235.0 | 21.3 | – | 11.05× | – |
+
+Encode was 5.22 to 11.40× faster than tiktoken-rs and 1.43 to 4.03× faster than bpe-openai, except on `long_runs`
+(61.16× and 8.50×).
+
+`r50k_base` and `p50k_base` count throughput in MiB/s, same run, against tiktoken-rs only:
+
+| Workload | MiB | `r50k_base` | tiktoken-rs | speedup | `p50k_base` | tiktoken-rs | speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `fixture_200k` | 0.895 | 191.9 | 22.4 | 8.56× | 160.7 | 21.4 | 7.52× |
+| `source_1MiB` | 1.000 | 207.6 | 21.5 | 9.64× | 203.7 | 21.8 | 9.36× |
+| `source_48B_chunks` | 0.250 | 177.5 | 18.2 | 9.77× | 179.3 | 18.5 | 9.71× |
+| `source_256B_chunks` | 0.250 | 205.4 | 20.1 | 10.20× | 204.8 | 20.3 | 10.10× |
+| `multilingual` | 0.468 | 215.7 | 28.1 | 7.69× | 213.1 | 28.2 | 7.55× |
+| `scanner_edges` | 0.262 | 99.3 | 11.3 | 8.80× | 101.1 | 11.4 | 8.91× |
+| `long_runs` | 1.678 | 1150.3 | 23.6 | 48.67× | 1194.1 | 16.1 | 74.02× |
+| `long_unrepeated` | 0.680 | 82.3 | 20.5 | 4.01× | 80.0 | 20.6 | 3.89× |
+| `random_cjk_ineligible` | 0.229 | 121.4 | 48.7 | 2.49× | 120.4 | 48.4 | 2.49× |
+| `session_snapshots` | 30.748 | 196.9 | 22.9 | 8.62× | 162.9 | 21.8 | 7.48× |
+| `special_tokens` | 0.270 | 197.3 | 21.3 | 9.25× | 194.3 | 21.2 | 9.16× |
+
+Encode was 2.44 to 9.14× (`r50k_base`) and 2.46 to 9.17× (`p50k_base`) faster than tiktoken-rs, except on
+`long_runs` (45.76× and 69.91×). `o200k_harmony` and `p50k_edit` special-token workloads ran within 6% of
+`o200k_base` and `p50k_base`.
 
 ### Random CJK
 
@@ -454,7 +477,7 @@ checked against bpe-openai, measured milliseconds per call before and after that
 In the same probe, 200 KB of random `a`/`b` took 3.1 ms versus 4.1 ms, and random punctuation about half
 bpe-openai's time, unchanged by that change. `bench` without `toks` or the private assets measured `multilingual`
 count at 137 → 178 MiB/s and `long_unrepeated` at 58 → 69 MiB/s; source and `long_runs` stayed within run-to-run
-variation. The table above predates the change.
+variation.
 
 The `random_cjk_ineligible` workload tracks the worst case in `bench`: 240 KB of random `些介传你供像力参`, none
 of them eligible in either encoding before the runtime last-byte check. Count throughput in MiB/s, this
@@ -472,8 +495,8 @@ MiB/s; other workloads stayed within run-to-run variation.
 
 ### Startup
 
-On a contended machine, the first count took 0.107 ms, versus 166 ms for tiktoken-rs and 78 ms for bpe-openai's
-vocabulary loading. Process launch is excluded. Cold caches and page faults still make the first call slower than later calls.
+The first count took 0.014 ms, versus 37 ms for tiktoken-rs and 23 ms for bpe-openai's vocabulary loading (median of
+three fresh processes each). Process launch is excluded. Cold caches and page faults still make the first call slower than later calls.
 
 Counting random `a`/`b` pieces of 16, 64 and 128 MiB peaked at 29, 77 and 141 MiB RSS (`/usr/bin/time -l`):
 13 MiB above the input for table pages and buffers. Encoding 64 MiB peaked at 164 MiB, including 87 MiB for

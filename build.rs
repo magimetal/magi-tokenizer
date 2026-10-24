@@ -1,6 +1,6 @@
-// Builds the static lookup tables from `assets/o200k_base.tiktoken` so the library starts with no parsing,
-// hashing or allocation. Outputs land in OUT_DIR: raw little/big-endian table images plus `tables.rs`,
-// which `src/tables.rs` includes.
+// Builds the static lookup tables of each enabled encoding from its `assets/<name>.tiktoken` vocabulary, so the
+// library starts with no parsing, hashing or allocation. Outputs land in OUT_DIR: raw little/big-endian table
+// images plus `<name>_tables.rs`, which `src/tables.rs` includes.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -12,23 +12,39 @@ use std::{env, fs};
 mod table_hash;
 use table_hash::*;
 
-const VOCABULARY_PATH: &str = "assets/o200k_base.tiktoken";
-/// o200k_base: 199,998 ordinary tokens; ids must fit the 18-bit pair-table field.
-const EXPECTED_TOKEN_COUNT: usize = 199_998;
-const EXPECTED_PAIR_COUNT: usize = 446_189;
+/// A vocabulary to build: name, enabling Cargo feature (None = always built), expected ordinary token and merge
+/// pair counts. Token ids must fit the 18-bit pair-table field.
+const VOCABULARIES: [(&str, Option<&str>, usize, usize); 2] = [
+    ("o200k_base", None, 199_998, 446_189),
+    ("cl100k_base", Some("CL100K_BASE"), 100_256, 233_378),
+];
 /// `PREMERGED_CHAR_TOKENS` has one entry per code point below this: every 2- and 3-byte UTF-8 character.
 const PREMERGED_CHAR_COUNT: usize = 0x10000;
 
 fn main() {
-    println!("cargo:rerun-if-changed={VOCABULARY_PATH}");
     println!("cargo:rerun-if-changed=src/table_hash.rs");
     println!("cargo:rerun-if-changed=build.rs");
-
     let little_endian = env::var("CARGO_CFG_TARGET_ENDIAN").expect("CARGO_CFG_TARGET_ENDIAN") == "little";
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let vocabulary = fs::read_to_string(VOCABULARY_PATH).expect("read vocabulary");
+    for (name, feature, expected_token_count, expected_pair_count) in VOCABULARIES {
+        if feature.is_none_or(|feature| env::var_os(format!("CARGO_FEATURE_{feature}")).is_some()) {
+            build_vocabulary(name, expected_token_count, expected_pair_count, little_endian, &out_dir);
+        }
+    }
+}
+
+fn build_vocabulary(
+    name: &str,
+    expected_token_count: usize,
+    expected_pair_count: usize,
+    little_endian: bool,
+    out_dir: &Path,
+) {
+    let vocabulary_path = format!("assets/{name}.tiktoken");
+    println!("cargo:rerun-if-changed={vocabulary_path}");
+    let vocabulary = fs::read_to_string(&vocabulary_path).expect("read vocabulary");
     let tokens = parse_tiktoken_vocabulary(&vocabulary);
-    assert_eq!(tokens.len(), EXPECTED_TOKEN_COUNT, "unexpected o200k_base vocabulary size");
+    assert_eq!(tokens.len(), expected_token_count, "unexpected {name} vocabulary size");
     assert!(tokens.len() < 1 << PAIR_ID_BITS);
 
     let mut id_by_bytes: HashMap<&[u8], u32> = HashMap::with_capacity(tokens.len());
@@ -45,11 +61,12 @@ fn main() {
     }
     token_offsets.push(token_bytes.len() as u32);
 
-    let vocab_table = build_vocab_table(&tokens);
-    let (pair_table, pair_count) = build_pair_table(&tokens, &id_by_bytes);
-    assert_eq!(pair_count, EXPECTED_PAIR_COUNT, "unexpected merge pair count");
-    // Library probe loops end at an empty slot, so each table must keep one.
-    assert!(tokens.len() < 1 << VOCAB_TABLE_BITS && pair_count < 1 << PAIR_TABLE_BITS);
+    // Library probe loops end at an empty slot, so each table keeps at least half its slots empty.
+    let vocab_table_bits = table_bits_for(tokens.len());
+    let pair_table_bits = table_bits_for(expected_pair_count);
+    let vocab_table = build_vocab_table(&tokens, vocab_table_bits);
+    let (pair_table, pair_count) = build_pair_table(&tokens, &id_by_bytes, pair_table_bits);
+    assert_eq!(pair_count, expected_pair_count, "unexpected {name} merge pair count");
 
     let byte_tokens: Vec<u32> = (0..=255u8).map(|byte| id_by_bytes[&[byte][..]]).collect();
     let byte_pair_ranks: Vec<u32> = (0..65536u32)
@@ -57,41 +74,51 @@ fn main() {
         .collect();
     let premerged_char_tokens = build_premerged_char_tokens(&tokens, &id_by_bytes);
 
-    fs::write(out_dir.join("token_bytes.bin"), &token_bytes).expect("write token bytes");
-    write_words(&out_dir.join("token_offsets.bin"), &token_offsets, little_endian);
-    write_words(&out_dir.join("vocab_table.bin"), &vocab_table, little_endian);
-    write_words(&out_dir.join("pair_table.bin"), &pair_table, little_endian);
-    write_words(&out_dir.join("byte_pair_ranks.bin"), &byte_pair_ranks, little_endian);
-    write_words(&out_dir.join("premerged_char_tokens.bin"), &premerged_char_tokens, little_endian);
+    let file = |table: &str| format!("{name}_{table}.bin");
+    fs::write(out_dir.join(file("token_bytes")), &token_bytes).expect("write token bytes");
+    write_words(&out_dir.join(file("token_offsets")), &token_offsets, little_endian);
+    write_words(&out_dir.join(file("vocab_table")), &vocab_table, little_endian);
+    write_words(&out_dir.join(file("pair_table")), &pair_table, little_endian);
+    write_words(&out_dir.join(file("byte_pair_ranks")), &byte_pair_ranks, little_endian);
+    write_words(&out_dir.join(file("premerged_char_tokens")), &premerged_char_tokens, little_endian);
 
     let mut source = String::new();
-    writeln!(source, "// @generated by build.rs from {VOCABULARY_PATH}. Do not edit.").unwrap();
+    writeln!(source, "// @generated by build.rs from {vocabulary_path}. Do not edit.").unwrap();
     writeln!(source, "pub(crate) const TOKEN_COUNT: usize = {};", tokens.len()).unwrap();
     writeln!(source, "pub(crate) const TOKEN_BYTES_LEN: usize = {};", token_bytes.len()).unwrap();
+    writeln!(source, "pub(crate) const VOCAB_TABLE_BITS: u32 = {vocab_table_bits};").unwrap();
+    writeln!(source, "pub(crate) const PAIR_TABLE_BITS: u32 = {pair_table_bits};").unwrap();
     writeln!(source, "pub(crate) static BYTE_TOKENS: [u32; 256] = {byte_tokens:?};").unwrap();
-    for (name, file, element, count) in [
-        ("TOKEN_OFFSETS", "token_offsets.bin", "u32", tokens.len() + 1),
-        ("VOCAB_TABLE", "vocab_table.bin", "u64", vocab_table.len()),
-        ("PAIR_TABLE", "pair_table.bin", "u64", pair_table.len()),
-        ("BYTE_PAIR_RANKS", "byte_pair_ranks.bin", "u32", byte_pair_ranks.len()),
-        ("PREMERGED_CHAR_TOKENS", "premerged_char_tokens.bin", "u32", premerged_char_tokens.len()),
+    for (static_name, table, element, count) in [
+        ("TOKEN_OFFSETS", "token_offsets", "u32", tokens.len() + 1),
+        ("VOCAB_TABLE", "vocab_table", "u64", vocab_table.len()),
+        ("PAIR_TABLE", "pair_table", "u64", pair_table.len()),
+        ("BYTE_PAIR_RANKS", "byte_pair_ranks", "u32", byte_pair_ranks.len()),
+        ("PREMERGED_CHAR_TOKENS", "premerged_char_tokens", "u32", premerged_char_tokens.len()),
     ] {
         writeln!(
             source,
-            "pub(crate) static {name}: &[{element}] = {{\n    \
+            "pub(crate) static {static_name}: &[{element}] = {{\n    \
              static RAW: Aligned<[u8; {count} * size_of::<{element}>()]> = \
-             Aligned(*include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{file}\")));\n    \
+             Aligned(*include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}\")));\n    \
              // SAFETY: RAW is 64-byte aligned, exactly {count} {element}s long, written in target byte order.\n    \
-             unsafe {{ core::slice::from_raw_parts(RAW.0.as_ptr().cast::<{element}>(), {count}) }}\n}};"
+             unsafe {{ core::slice::from_raw_parts(RAW.0.as_ptr().cast::<{element}>(), {count}) }}\n}};",
+            file(table)
         )
         .unwrap();
     }
     writeln!(
         source,
-        "pub(crate) static TOKEN_BYTES: &[u8; TOKEN_BYTES_LEN] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/token_bytes.bin\"));"
+        "pub(crate) static TOKEN_BYTES: &[u8; TOKEN_BYTES_LEN] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}\"));",
+        file("token_bytes")
     )
     .unwrap();
-    fs::write(out_dir.join("tables.rs"), source).expect("write tables.rs");
+    fs::write(out_dir.join(format!("{name}_tables.rs")), source).expect("write tables source");
+}
+
+/// Slot count exponent of a hash table holding `entries`: the smallest power of two at least twice as large.
+fn table_bits_for(entries: usize) -> u32 {
+    (2 * entries).next_power_of_two().trailing_zeros()
 }
 
 fn parse_tiktoken_vocabulary(text: &str) -> Vec<Vec<u8>> {
@@ -145,12 +172,12 @@ fn inline_key(bytes: &[u8]) -> (u64, u32) {
     (u64::from_le_bytes(head), u32::from_le_bytes(tail))
 }
 
-fn build_vocab_table(tokens: &[Vec<u8>]) -> Vec<u64> {
-    let mask = (1usize << VOCAB_TABLE_BITS) - 1;
-    let mut table = vec![0u64; 2 << VOCAB_TABLE_BITS];
+fn build_vocab_table(tokens: &[Vec<u8>], table_bits: u32) -> Vec<u64> {
+    let mask = (1usize << table_bits) - 1;
+    let mut table = vec![0u64; 2 << table_bits];
     for (id, bytes) in tokens.iter().enumerate() {
         let (head, tail) = inline_key(bytes);
-        let mut slot = vocab_slot_for(head, tail, bytes.len());
+        let mut slot = vocab_slot_for(head, tail, bytes.len(), table_bits);
         while table[2 * slot + 1] != 0 {
             slot = (slot + 1) & mask;
         }
@@ -162,9 +189,9 @@ fn build_vocab_table(tokens: &[Vec<u8>]) -> Vec<u64> {
 }
 
 /// Every split of a token into two tokens is a merge whose priority is the merged token's id.
-fn build_pair_table(tokens: &[Vec<u8>], id_by_bytes: &HashMap<&[u8], u32>) -> (Vec<u64>, usize) {
-    let mask = (1usize << PAIR_TABLE_BITS) - 1;
-    let mut table = vec![PAIR_EMPTY_SLOT; 1 << PAIR_TABLE_BITS];
+fn build_pair_table(tokens: &[Vec<u8>], id_by_bytes: &HashMap<&[u8], u32>, table_bits: u32) -> (Vec<u64>, usize) {
+    let mask = (1usize << table_bits) - 1;
+    let mut table = vec![PAIR_EMPTY_SLOT; 1 << table_bits];
     let mut count = 0;
     for (id, bytes) in tokens.iter().enumerate() {
         for split in 1..bytes.len() {
@@ -173,7 +200,7 @@ fn build_pair_table(tokens: &[Vec<u8>], id_by_bytes: &HashMap<&[u8], u32>) -> (V
                 continue;
             };
             let key = pair_key(left, right);
-            let mut slot = pair_slot_for(key);
+            let mut slot = pair_slot_for(key, table_bits);
             while table[slot] != PAIR_EMPTY_SLOT {
                 assert_ne!(table[slot] >> PAIR_ID_BITS, key, "pair ({left}, {right}) merges twice");
                 slot = (slot + 1) & mask;

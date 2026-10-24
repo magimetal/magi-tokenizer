@@ -23,6 +23,7 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
       - run: cargo build -p magi-tokenizer
+      - run: cargo build -p magi-tokenizer --features cl100k_base
       - run: cargo build -p magi-tokenizer --features harness
 
   clippy:
@@ -50,7 +51,7 @@ jobs:
         with:
           targets: i686-unknown-linux-gnu
       - run: sudo apt-get update && sudo apt-get install -y gcc-multilib
-      - run: cargo build --release -p magi-tokenizer --target i686-unknown-linux-gnu
+      - run: cargo build --release -p magi-tokenizer --features cl100k_base --target i686-unknown-linux-gnu
 
   build-s390x:
     name: build (s390x Linux, big-endian)

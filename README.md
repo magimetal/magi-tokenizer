@@ -1,7 +1,7 @@
 # magi-tokenizer
 
-A fast Rust tokenizer for OpenAI's `o200k_base` encoding. It produces the same token IDs as
-[tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary` and `encode_with_special_tokens`.
+A fast Rust tokenizer for OpenAI's `o200k_base` and (optional feature) `cl100k_base` encodings. It produces the
+same token IDs as [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary` and `encode_with_special_tokens`.
 
 Experimental, version 0.0.2. No automated correctness suite is included. See
 [Known limitations](#known-limitations) and [GitHub issues](https://github.com/magimetal/magi-tokenizer/issues).
@@ -32,13 +32,26 @@ assert_eq!(magi_tokenizer::decode(&ids).as_deref(), Some(text));
 No setup or vocabulary load: tables are embedded at compile time. The first call still pays for cold caches
 and table pages loaded on demand (see [Startup](#startup)).
 
+`cl100k_base` (GPT-4, GPT-3.5 Turbo, `text-embedding-*`) is opt-in:
+
+```toml
+magi-tokenizer = { version = "=0.0.2", features = ["cl100k_base"] }
+```
+
+```rust
+use magi_tokenizer::cl100k_base;
+let ids = cl100k_base::encode_ordinary("Hello, world!");
+assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
+```
+
 ## Scope
 
 | Item | State |
 | --- | --- |
-| Encoding | `o200k_base`: 199,998 ordinary tokens (IDs 0–199,997) plus special tokens |
-| Special tokens | `<\|endoftext\|>` = 199,999, `<\|endofprompt\|>` = 200,018 |
-| Models | Upstream tiktoken maps the GPT-4o, o-series and GPT-5 model prefixes to `o200k_base`. magi-code v0.97.6 also routes `gpt-6-*` and `gpt-6.1-*` (including `gpt-6-astra`) to `o200k_base`; its maintainer validated that routing in magi-code. The library exposes the encoding, not a model-name router; model routing stays with the application. |
+| Encodings | `o200k_base` (always built; module `o200k_base`, also re-exported at the crate root): 199,998 ordinary tokens (IDs 0–199,997). `cl100k_base` (feature `cl100k_base`; module `cl100k_base`): 100,256 ordinary tokens (IDs 0–100,255). Each module has the same functions and constants. |
+| Other encodings | `o200k_harmony`: ordinary text only. tiktoken-rs 0.12.0 builds it from the same vocabulary and split pattern as `o200k_base`, so `o200k_base::encode_ordinary` and `count_ordinary` give the same IDs and counts. Its special tokens differ (for example, 200018 is `<\|reserved_200018\|>`, not `<\|endofprompt\|>`), so do not use the special-token APIs for it ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)). The legacy `r50k_base`, `p50k_base` and `p50k_edit` encodings are not implemented ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)). |
+| Special tokens | `o200k_base`: `<\|endoftext\|>` = 199,999, `<\|endofprompt\|>` = 200,018. `cl100k_base`: `<\|endoftext\|>` = 100,257, `<\|fim_prefix\|>` = 100,258, `<\|fim_middle\|>` = 100,259, `<\|fim_suffix\|>` = 100,260, `<\|endofprompt\|>` = 100,276 |
+| Models | Upstream tiktoken maps the GPT-4o, o-series and GPT-5 model prefixes to `o200k_base`, and GPT-4, GPT-3.5 Turbo and `text-embedding-ada-002`/`-3` to `cl100k_base`. magi-code v0.97.6 also routes `gpt-6-*` and `gpt-6.1-*` (including `gpt-6-astra`) to `o200k_base`; its maintainer validated that routing in magi-code. The library exposes encodings, not a model-name router; model routing stays with the application. |
 | Input | `&str` (valid UTF-8). Decoding can return raw bytes for token sequences that are not valid UTF-8. |
 | Platforms | Any Rust target. Tables are emitted in the target's byte order. CI builds on x86_64 and ARM64 Linux, ARM64 macOS, x86_64 and ARM64 Windows, 32-bit i686 Linux and big-endian s390x Linux. Speed and memory were measured only on ARM64 macOS. |
 
@@ -55,22 +68,28 @@ and table pages loaded on demand (see [Startup](#startup)).
 - Cap untrusted input before calling the library. Encoding allocates 4 bytes per output token. The whole-piece
   heap fallback uses memory proportional to piece length: 26 to 27 bytes per piece byte in measured runs, not a
   proven bound. No tested input reaches it naturally, but none is known to rule it out. There is no memory-limit setting.
-- Embedded tables add about 19 MiB. A release program counting one string was 19.9 MB, versus 0.5 MB empty and
+- Embedded `o200k_base` tables add about 19 MiB. A release program counting one string was 19.9 MB, versus 0.5 MB empty and
   35.1 MB with bpe-openai (ARM64 macOS). Clean debug and release builds each took about 1.3 s on an Apple M5 Pro.
   Dependents use their own build profiles, not this repository's. If debug table generation is slow, add
   `[profile.dev.build-override] opt-level = 3`.
+- `cl100k_base` costs only when used. In a fat-LTO release program counting one string with each encoding, the
+  binary grew from 20.1 MB (`o200k_base` only) to 30.2 MB (+10.1 MB); enabling the feature without calling it left the
+  size unchanged, since unused tables are dropped at link time. Clean release builds of that program took 3.6 s
+  without the feature and 4.5 s with it (median of three, Apple M5 Pro).
 
 ## API
 
-All functions are free functions, with no tokenizer object, global state or locking. Any number of threads can call them concurrently.
+All functions are free functions, with no tokenizer object, global state or locking. Any number of threads can call
+them concurrently. Each encoding module (`magi_tokenizer::o200k_base`, `magi_tokenizer::cl100k_base`) has these
+functions; the crate root re-exports `o200k_base`.
 
 | Function | Purpose |
 | --- | --- |
-| `pieces(text) -> Pieces` | Iterator over the pretokenization pieces (the substrings tiktoken's regex produces). |
+| `pieces(text) -> Pieces` | Iterator over the pretokenization pieces (the substrings the encoding's tiktoken regex produces). |
 | `encode_ordinary(text) -> Vec<u32>` | Token IDs. Special-token text is encoded as ordinary text. |
 | `encode_ordinary_into(text, &mut Vec<u32>)` | Same, appended to an existing vector so its allocation can be reused. |
 | `count_ordinary(text) -> usize` | Number of tokens `encode_ordinary` returns. |
-| `encode_with_special_tokens(text) -> Vec<u32>` | Token IDs with `<\|endoftext\|>` and `<\|endofprompt\|>` recognised. |
+| `encode_with_special_tokens(text) -> Vec<u32>` | Token IDs with the encoding's special tokens recognised. |
 | `count_with_special_tokens(text) -> usize` | Number of tokens `encode_with_special_tokens` returns. |
 | `token_bytes(id) -> Option<&'static [u8]>` | Bytes of one ordinary or special token; `None` for an unknown ID. |
 | `decode_bytes(ids) -> Option<Vec<u8>>` | Concatenated bytes; `None` if an ID is unknown. |
@@ -93,7 +112,7 @@ invariants. No automated correctness suite is included.
 
 ## What is different
 
-Every exact `o200k_base` tokenizer must reproduce the same regex splits and lowest-rank adjacent-pair merges.
+Every exact tokenizer must reproduce the same regex splits and lowest-rank adjacent-pair merges.
 These three implementations compute them differently:
 
 | Stage | tiktoken-rs | bpe-openai | magi-tokenizer |
@@ -108,7 +127,7 @@ On source code, transcripts and the shared fixture, magi-tokenizer is about 6× 
 faster than bpe-openai. Cached windows make long runs about 64× and 5.6× faster, respectively. Counting avoids
 storing output tokens. These results exclude the whole-piece heap fallback.
 
-It supports fewer encodings than either competitor.
+It supports fewer encodings than either competitor: no Harmony special tokens and no legacy 50k encodings.
 All measurements come from one machine under background load (see [Caveats](#caveats)).
 
 ## How it works
@@ -116,24 +135,28 @@ All measurements come from one machine under background load (see [Caveats](#cav
 1. Pretokenization splits text into words with optional leading space or punctuation, groups of 1 to 3 digits,
    punctuation runs, whitespace runs and English contractions.
 2. Each piece starts as bytes. Merge the adjacent pair with the lowest vocabulary rank, choosing the leftmost
-   pair on ties, until no pair forms a vocabulary token. In `o200k_base`, rank equals token ID.
+   pair on ties, until no pair forms a vocabulary token. In `o200k_base` and `cl100k_base`, rank equals token ID.
 
 ### Build-time tables (`build.rs`, `src/table_hash.rs`, `src/tables.rs`)
 
-`build.rs` has no dependencies. It parses `assets/o200k_base.tiktoken` and emits aligned binary tables in the target's byte order:
+`build.rs` has no dependencies. For each enabled encoding it parses `assets/<name>.tiktoken` and emits aligned binary
+tables in the target's byte order. `cl100k_base` tables are generated only with its feature. Sizes below are for
+`o200k_base`; each hash table gets the smallest power-of-two slot count at least twice its entry count, so
+`cl100k_base` uses 2^18 vocabulary and 2^19 pair slots.
 
 - Token bytes and offsets map IDs to bytes for decoding.
 - The vocabulary hash table has 2^19 slots, about 38% full. Each slot uses two `u64`s for the first 8 bytes,
   4 tail bytes, length and ID. Tokens up to 12 bytes are confirmed in the slot. Longer tokens require a byte comparison.
 - The pair table has 2^20 slots, about 43% full. Each `u64` maps `(left ID, right ID)` to the merged ID.
-  It covers all 446,189 splits of vocabulary tokens into two vocabulary tokens. IDs fit in 18 bits.
+  It covers all 446,189 splits of vocabulary tokens into two vocabulary tokens (233,378 for `cl100k_base`). IDs fit in 18 bits.
 - A dense 65,536-entry array holds byte-pair ranks for the most common lookup: the first merge.
 - A byte-token table holds the 256 single-byte tokens (IDs 0 to 255).
 - A 65,536-entry array, one per 2- and 3-byte character, holds the character's token when merging may start from
   it whole instead of from its bytes (see [Byte-pair merging](#byte-pair-merging-srcbpers)), else 0.
 
 Token and pair counts are checked at build time, so a changed vocabulary fails the build rather than producing
-wrong tables. The build script and library share hash functions from `src/table_hash.rs`.
+wrong tables. The build script and library share hash functions from `src/table_hash.rs`. Lookups and merging are
+generic over the encoding, so each encoding gets its own compiled copy with its table addresses as constants.
 
 ### Pretokenizer (`src/scanner.rs`, `src/unicode_classes.rs`)
 
@@ -144,6 +167,10 @@ engine. The hand-written scanner tries all seven alternatives in order and repro
 - an optional leading character that is not a letter, digit, CR or LF;
 - whitespace runs that return their last space to the next word;
 - `\s*[\r\n]+` and `\s+(?!\S)`.
+
+A second scanner implements the `cl100k_base` regex: standalone contractions, letters with an optional possessive
+leading character, 1 to 3 digits, punctuation runs that take trailing CR/LF, and `\s++$`, `\s*[\r\n]`,
+`\s+(?!\S)`, `\s`. Both share the class table and digit, contraction and run helpers.
 
 The scanner reads Unicode scalars and looks up one class byte per code point in the generated
 `src/unicode_classes.rs` (about 110 KB). `tools/gen-unicode` uses `regex` 1.12.4 and `regex-syntax` 0.8.11,
@@ -217,10 +244,12 @@ The heap merge also handles windows over 128 bytes. It uses `u32` positions, swi
 
 ## Benchmarks
 
-`magi-tokenizer-bench bench` compares count and encode throughput against tiktoken-rs 0.12.0 and bpe-openai 0.3.2.
-It checks equal total token counts before timing five jobs: magi count/encode, bpe-openai count/encode and tiktoken
-encode. Each runs for at least 150 ms in five rounds, with rotated order. Figures are median rounds.
-For tiktoken-rs, which has no separate count, both figures use encode.
+`magi-tokenizer-bench bench` compares count and encode throughput against tiktoken-rs 0.12.0 and bpe-openai 0.3.2
+for both encodings. Before timing, it checks that magi-tokenizer returns tiktoken's exact token IDs, counts and
+decoded text for every workload, plus special tokens spliced between texts, a Unicode sweep (planes 0–2 and 14 in
+six contexts), short random strings around scanner edge cases and the forced whole-piece fallback. It then times
+five jobs: magi count/encode, bpe-openai count/encode and tiktoken encode. Each runs for at least 150 ms in five
+rounds, with rotated order. Figures are median rounds. For tiktoken-rs, which has no separate count, both figures use encode.
 
 Count throughput in MiB/s, commit `629e2e6` (library code as in `49b9a29`), Rust 1.98.1, `toks` source and both private assets:
 
@@ -239,6 +268,20 @@ Encode was 3.02 to 6.49× faster than tiktoken-rs and 1.25 to 3.63× faster than
 (65.15× and 6.04×). An immediate second run kept magi count within 4%. bpe-openai ratios moved more:
 `fixture_200k` count went from 2.85× to 3.10×, within the roughly 10% variation noted under [Caveats](#caveats).
 Source results differ when using this repository instead of `toks`.
+
+`cl100k_base` count throughput in MiB/s, Rust 1.98.1, this repository's source (`git archive` of `5ac7c1e`), no
+private assets. Back-to-back runs of the pre-change bench and this one put `o200k_base` count and encode within 2%
+of the pre-change library on every shared workload.
+
+| Workload | MiB | magi-tokenizer | tiktoken-rs | bpe-openai | vs tiktoken | vs bpe-openai |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `source_1MiB` | 0.218 | 250.8 | 12.7 | 51.3 | 19.75× | 4.88× |
+| `source_48B_chunks` | 0.218 | 223.3 | 11.6 | 48.5 | 19.26× | 4.61× |
+| `source_256B_chunks` | 0.218 | 243.3 | 12.4 | 50.8 | 19.59× | 4.79× |
+| `multilingual` | 0.468 | 176.8 | 28.3 | 90.4 | 6.25× | 1.96× |
+| `scanner_edges` | 0.262 | 81.3 | 11.6 | 41.6 | 7.03× | 1.96× |
+| `long_runs` | 1.678 | 1005.9 | 14.5 | 120.1 | 69.57× | 8.38× |
+| `long_unrepeated` | 0.680 | 68.9 | 14.3 | 44.8 | 4.82× | 1.54× |
 
 ### Random CJK
 
@@ -295,9 +338,10 @@ The native `toks` C library has not been benchmarked.
 
 ```text
 assets/o200k_base.tiktoken   o200k_base vocabulary (base64 token, rank per line), 3.6 MB
-build.rs                     parses the vocabulary, emits binary tables + bindings into OUT_DIR
-src/lib.rs                   public API: pieces, encode/count (ordinary and special), decode
-src/scanner.rs               hand-written o200k pretokenizer
+assets/cl100k_base.tiktoken  cl100k_base vocabulary, 1.7 MB (tables built only with feature `cl100k_base`)
+build.rs                     parses each enabled vocabulary, emits binary tables + bindings into OUT_DIR
+src/lib.rs                   public API: one module per encoding with pieces, encode/count, decode
+src/scanner.rs               hand-written o200k and cl100k pretokenizers
 src/unicode_classes.rs       generated per-code-point class table (do not edit by hand)
 src/bpe.rs                   short-piece, window and heap byte-pair merging
 src/tables.rs                table lookups: vocabulary, pair ranks, byte ranks, token bytes
@@ -315,9 +359,9 @@ harness needs newer standard-library APIs and uses stable in CI. Development use
 # Library
 cargo build --release
 
-# Throughput, all three tokenizers; an optional filter matches workload names
+# Exact-ID checks, then throughput, all three tokenizers; an optional filter matches encoding/workload names
 cargo run --release -p magi-tokenizer-bench -- bench
-cargo run --release -p magi-tokenizer-bench -- bench long
+cargo run --release -p magi-tokenizer-bench -- bench cl100k/long
 
 # First-call time in a fresh process
 cargo run --release -p magi-tokenizer-bench -- startup magi        # or tiktoken, bpe-openai
@@ -341,9 +385,11 @@ The release profile uses fat LTO and one codegen unit. Build scripts use `opt-le
   from bytes: about level with bpe-openai, not faster.
 - If no stitch point exists within 4,096 bytes, whole-piece fallback can use much more time and memory
   (see [measured fallback costs](#how-it-works)). No input is known to rule it out. Measured costs are not proven bounds.
-- Only `o200k_base` is implemented, not `cl100k_base`, `o200k_harmony` or model-name routing.
+- `o200k_harmony` special tokens ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)) and the legacy
+  `r50k_base`, `p50k_base` and `p50k_edit` encodings ([#19](https://github.com/magimetal/magi-tokenizer/issues/19))
+  are not implemented, and there is no model-name routing ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)).
 - The `usize` index path has not been exercised on a real piece of 4 GiB or more.
-- Speed and memory were measured only on ARM64 macOS. CI does not run correctness comparisons.
+- Speed and memory were measured only on ARM64 macOS. CI does not run correctness comparisons; run `bench` locally.
 
 ## Provenance and licensing
 
@@ -353,7 +399,7 @@ tables. [NOTICE](NOTICE) contains the attributions, full vocabulary MIT notice a
 
 | Component | Source | Licence |
 | --- | --- | --- |
-| `assets/o200k_base.tiktoken` | OpenAI [tiktoken](https://github.com/openai/tiktoken) public vocabulary | MIT (tiktoken) |
+| `assets/o200k_base.tiktoken`, `assets/cl100k_base.tiktoken` | OpenAI [tiktoken](https://github.com/openai/tiktoken) public vocabularies | MIT (tiktoken) |
 | Scanner design (`src/scanner.rs`) | [toks](https://github.com/actualcomputer/toks) revision `2ebc390`, `src/core/k3_o200k_c.c` and `kernels.h`, Copyright 2026 Actual Computer Inc., rewritten in Rust | Apache-2.0 |
 | Window stitching property | [`bpe` crate](https://github.com/github/rust-gems/tree/main/crates/bpe) README, "Properties of BPE". Only the property is used; no code from the crate is included. | MIT |
 | Unicode classes | Generated from `regex` 1.12.4 / `regex-syntax` 0.8.11 (Unicode 16 data) | MIT OR Apache-2.0; Unicode License v3 |

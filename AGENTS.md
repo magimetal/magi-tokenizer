@@ -3,19 +3,20 @@
 
 ## Scope and purpose
 - Applies throughout this repository unless a nearer `AGENTS.md` overrides it.
-- `magi-tokenizer` is a dependency-free Rust implementation of the `o200k_base` tokenizer.
+- `magi-tokenizer` is a dependency-free Rust implementation of the `o200k_base` and `cl100k_base` tokenizers.
 - Library crate: `magi_tokenizer`; Rust edition 2024, minimum Rust 1.88.
-- Support only `o200k_base`; do not imply model routing or other vocabularies.
+- `o200k_base` always builds and is re-exported at the crate root; `cl100k_base` is behind feature `cl100k_base`.
+- Do not imply model routing, Harmony special tokens (#18) or legacy 50k encodings (#19).
 
 ## Source map
 - `src/lib.rs`: public encoding, counting, decoding, and piece APIs.
-- `src/scanner.rs`: handwritten scanner matching the reference regex behavior.
+- `src/scanner.rs`: handwritten o200k and cl100k scanners matching the reference regex behavior.
 - `src/bpe.rs`: byte-pair merging, windowed encoding, and whole-piece fallback.
 - `src/tables.rs` and `src/table_hash.rs`: runtime table access and shared hashing.
 - `src/unicode_classes.rs`: generated Unicode classification tables.
 - `src/harness.rs`: unstable memory-benchmark instrumentation behind feature `harness`.
 - `build.rs`: vocabulary processing and build-time table generation.
-- `assets/o200k_base.tiktoken`: source vocabulary.
+- `assets/<encoding>.tiktoken`: source vocabularies.
 - `bench/`: isolated benchmark dependencies; workspace member, not published.
 - `tools/gen-unicode/`: standalone generator, excluded from the root workspace.
 - `.github/workflows/ci.yml`: authoritative CI configuration.
@@ -42,7 +43,7 @@ cargo run --release -p magi-tokenizer-bench -- memory 64 count window
 ## Public API boundaries
 - Public text inputs are `&str`; internal BPE operations support arbitrary bytes.
 - Ordinary encoding treats special-token spellings as ordinary text.
-- Special-token APIs recognize `END_OF_TEXT` (199999) and `END_OF_PROMPT` (200018).
+- Special-token APIs recognize each module's `SPECIAL_TOKENS`: o200k 199999/200018; cl100k 100257–100260/100276.
 - `encode_ordinary_into` appends; preserve existing output.
 - Invalid token IDs return `None`; `decode` also rejects invalid UTF-8.
 - Keep counting independent of emitting token IDs; keep `harness` out of consumer API promises.
@@ -65,7 +66,8 @@ cargo run --release -p magi-tokenizer-bench -- memory 64 count window
 - `build.rs` emits Rust/binary tables under `OUT_DIR`; do not hand-edit generated outputs.
 - Keep build-time and runtime hash geometry synchronized.
 - Preserve typed-blob safety assertions, 64-byte alignment, and `CARGO_CFG_TARGET_ENDIAN` handling.
-- Preserve 32-bit and big-endian support; expected ordinary-token/pair counts are 199998/446189.
+- Preserve 32-bit and big-endian support; expected ordinary-token/pair counts are o200k 199998/446189, cl100k 100256/233378.
+- `bench` asserts exact tiktoken-rs IDs for both encodings before timing; run it after scanner or merge changes.
 - Preserve vocabulary, scanner, and Unicode attribution in `NOTICE` and package license metadata.
 
 ## Benchmark interpretation

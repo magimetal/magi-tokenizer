@@ -112,8 +112,16 @@ fn load_le_padded(bytes: &[u8]) -> u64 {
 #[inline]
 pub(crate) fn token_id_for_bytes<V: Vocabulary>(bytes: &[u8]) -> Option<u32> {
     let len = bytes.len();
-    if len == 0 || len > MAX_TOKEN_BYTES {
-        return None;
+    // One- and two-byte pieces are most pieces in typical text; direct tables skip hashing.
+    match len {
+        1 => return Some(V::byte_tokens()[bytes[0] as usize]),
+        2 => {
+            let id = byte_merge_rank::<V>(bytes[0], bytes[1]);
+            return (id != NO_MERGE).then_some(id);
+        }
+        0 => return None,
+        _ if len > MAX_TOKEN_BYTES => return None,
+        _ => {}
     }
     let head = load_le_padded(bytes);
     let tail = if len > 8 { load_le_padded(&bytes[8..len.min(INLINE_TOKEN_BYTES)]) as u32 } else { 0 };

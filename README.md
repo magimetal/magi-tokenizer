@@ -1,8 +1,8 @@
 # magi-tokenizer
 
-A fast Rust tokenizer for OpenAI's `o200k_base` and (optional feature) `cl100k_base` encodings. It produces the
-same token IDs as [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary`, `encode_with_special_tokens`
-and `encode` with an allow-list of special tokens.
+A fast Rust tokenizer for OpenAI's `o200k_base`, `o200k_harmony` and (optional feature) `cl100k_base` encodings.
+It produces the same token IDs as [tiktoken](https://github.com/openai/tiktoken) for `encode_ordinary`,
+`encode_with_special_tokens` and `encode` with an allow-list of special tokens.
 
 Experimental, version 0.0.2. From 0.1.0, releases follow the [compatibility policy](#compatibility). No automated
 correctness suite is included. See [Known limitations](#known-limitations) and
@@ -51,13 +51,21 @@ let ids = cl100k_base::encode_ordinary("Hello, world!");
 assert_eq!(cl100k_base::count_ordinary("Hello, world!"), ids.len());
 ```
 
+`o200k_harmony` (`gpt-oss-*`) is always built. It shares `o200k_base`'s tables and adds only its special tokens:
+
+```rust
+use magi_tokenizer::o200k_harmony;
+let ids = o200k_harmony::encode_with_special_tokens("<|start|>user<|message|>Hi<|end|>");
+assert_eq!(ids[0], o200k_harmony::START);
+```
+
 ## Scope
 
 | Item | State |
 | --- | --- |
-| Encodings | `o200k_base` (always built; module `o200k_base`, also re-exported at the crate root): 199,998 ordinary tokens (IDs 0–199,997). `cl100k_base` (feature `cl100k_base`; module `cl100k_base`): 100,256 ordinary tokens (IDs 0–100,255). Each module has the same functions and constants. |
-| Other encodings | `o200k_harmony`: ordinary text only. tiktoken-rs 0.12.0 builds it from the same vocabulary and split pattern as `o200k_base`, so `o200k_base::encode_ordinary` and `count_ordinary` give the same IDs and counts. Its special tokens differ (for example, 200018 is `<\|reserved_200018\|>`, not `<\|endofprompt\|>`), so do not use the special-token APIs for it ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)). The legacy `r50k_base`, `p50k_base` and `p50k_edit` encodings are not implemented ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)). |
-| Special tokens | `o200k_base`: `<\|endoftext\|>` = 199,999, `<\|endofprompt\|>` = 200,018. `cl100k_base`: `<\|endoftext\|>` = 100,257, `<\|fim_prefix\|>` = 100,258, `<\|fim_middle\|>` = 100,259, `<\|fim_suffix\|>` = 100,260, `<\|endofprompt\|>` = 100,276 |
+| Encodings | `o200k_base` (always built; module `o200k_base`, also re-exported at the crate root): 199,998 ordinary tokens (IDs 0–199,997). `o200k_harmony` (always built; module `o200k_harmony`): same vocabulary and split pattern as `o200k_base`, so ordinary IDs and counts are identical; only its special tokens differ. `cl100k_base` (feature `cl100k_base`; module `cl100k_base`): 100,256 ordinary tokens (IDs 0–100,255). Each module has the same functions and constants. |
+| Other encodings | The legacy `r50k_base`, `p50k_base` and `p50k_edit` encodings are not implemented ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)). |
+| Special tokens | `o200k_base`: `<\|endoftext\|>` = 199,999, `<\|endofprompt\|>` = 200,018. `o200k_harmony`: 1,090 tokens, IDs 199,998–201,087, as in tiktoken-rs 0.12.0: `<\|startoftext\|>` = 199,998, `<\|endoftext\|>` = 199,999, `<\|return\|>` = 200,002, `<\|constrain\|>` = 200,003, `<\|channel\|>` = 200,005, `<\|start\|>` = 200,006, `<\|end\|>` = 200,007, `<\|message\|>` = 200,008, `<\|call\|>` = 200,012; every other ID is `<\|reserved_{id}\|>` (so 200,018 is `<\|reserved_200018\|>`, not `<\|endofprompt\|>`). `cl100k_base`: `<\|endoftext\|>` = 100,257, `<\|fim_prefix\|>` = 100,258, `<\|fim_middle\|>` = 100,259, `<\|fim_suffix\|>` = 100,260, `<\|endofprompt\|>` = 100,276 |
 | Models | Upstream tiktoken (`tiktoken/model.py`) maps GPT-4o, GPT-4.1, GPT-4.5, GPT-5 and o-series names to `o200k_base`; GPT-4, GPT-3.5 Turbo, `davinci-002`, `babbage-002` and `text-embedding-ada-002`/`-3` to `cl100k_base`; and `gpt-oss-*` to `o200k_harmony`. magi-code v0.97.6 also routes `gpt-6-*` and `gpt-6.1-*` (including `gpt-6-astra`) to `o200k_base`; its maintainer validated that routing in magi-code. The library exposes encodings, not a model-name router: model routing stays with the application by decision (see [Model routing](#model-routing)). |
 | Input | `&str` (valid UTF-8) by decision; convert other bytes first, for example with `String::from_utf8_lossy` (see [Byte input](#byte-input)). Decoding can return raw bytes for token sequences that are not valid UTF-8. |
 | Platforms | Any Rust target. Tables are emitted in the target's byte order. CI builds on x86_64 and ARM64 Linux, ARM64 macOS, x86_64 and ARM64 Windows, 32-bit i686 Linux and big-endian s390x Linux. Speed and memory were measured only on ARM64 macOS. |
@@ -132,9 +140,8 @@ encodings and does not plan to. Keep the mapping in your application, and pick t
   until they upgrade.
 - There is no single source of truth. Upstream tiktoken does not list `gpt-6-*`, which magi-code routes to
   `o200k_base`. The application that knows which models it calls is the right owner.
-- Results would be incomplete: `cl100k_base` can be compiled out, `gpt-oss-*` uses `o200k_harmony`, whose
-  special tokens are not implemented ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)), and the
-  legacy 50k encodings are missing ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)).
+- Results would be incomplete: `cl100k_base` can be compiled out and the legacy 50k encodings are missing
+  ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)).
 - A mapping would be API surface whose behavior changes with every update. Changing a name's encoding changes its
   token counts, which the [compatibility policy](#compatibility) allows only in a new minor version.
 
@@ -163,8 +170,8 @@ three bytes `EF BF BD`, and `decode_bytes` returns those, not the replaced bytes
 ## API
 
 All functions are free functions, with no tokenizer object, global state or locking. Any number of threads can call
-them concurrently. Each encoding module (`magi_tokenizer::o200k_base`, `magi_tokenizer::cl100k_base`) has these
-functions; the crate root re-exports `o200k_base`.
+them concurrently. Each encoding module (`magi_tokenizer::o200k_base`, `magi_tokenizer::o200k_harmony`,
+`magi_tokenizer::cl100k_base`) has these functions; the crate root re-exports `o200k_base`.
 
 | Function | Purpose |
 | --- | --- |
@@ -182,8 +189,16 @@ functions; the crate root re-exports `o200k_base`.
 | `decode_bytes(ids) -> Option<Vec<u8>>` | Concatenated bytes; `None` if an ID is unknown. |
 | `decode(ids) -> Option<String>` | Decoded text; `None` if an ID is unknown or the bytes are not valid UTF-8. |
 
-Constants: `END_OF_TEXT`, `END_OF_PROMPT`, `SPECIAL_TOKENS`, `ORDINARY_TOKEN_COUNT`. Error type (crate root):
+Constants: `SPECIAL_TOKENS` (sorted by ID), `ORDINARY_TOKEN_COUNT` and one constant per named special token
+(`END_OF_TEXT`, `END_OF_PROMPT`, `FIM_PREFIX`, …; `o200k_harmony` has `START_OF_TEXT`, `END_OF_TEXT`, `RETURN`,
+`CONSTRAIN`, `CHANNEL`, `START`, `END`, `MESSAGE` and `CALL`). Error type (crate root):
 `DisallowedSpecialToken { token, position }`.
+
+Special-token lookup does not scan the token list at each `<|`. Every special token is `<|`, a name and `|>`, with
+no other `|>` inside (checked at compile time), so the only candidate at a `<|` is the text up to the next `|>`.
+`o200k_harmony` looks that up by binary search over its 1,090 tokens; the short lists of the other encodings are
+compared directly. `token_bytes` finds a special ID by binary search. `o200k_harmony` adds 49,552 bytes to a
+stripped, LTO release binary that calls it (measured on ARM64 macOS against the same program calling `o200k_base`).
 
 ### Panics
 
@@ -215,7 +230,7 @@ On source code, transcripts and the shared fixture, magi-tokenizer is about 6× 
 faster than bpe-openai. Cached windows make long runs about 64× and 5.6× faster, respectively. Counting avoids
 storing output tokens. These results exclude the whole-piece fallback.
 
-It supports fewer encodings than either competitor: no Harmony special tokens and no legacy 50k encodings.
+It supports fewer encodings than either competitor: no legacy 50k encodings.
 All measurements come from one machine under background load (see [Caveats](#caveats)).
 
 ## How it works
@@ -348,13 +363,19 @@ where the two link arrays and the tree use 8-byte entries: 32 bytes per piece by
 ## Benchmarks
 
 `magi-tokenizer-bench bench` compares count and encode throughput against tiktoken-rs 0.12.0 and bpe-openai 0.3.2
-for both encodings. Before timing, it checks that magi-tokenizer returns tiktoken's exact token IDs, counts and
+for `o200k_base` and `cl100k_base`. Before timing, it checks that magi-tokenizer returns tiktoken's exact token IDs, counts and
 decoded text for every workload, plus special tokens spliced between texts (all allowed, and allow-lists checked
 against tiktoken-rs `CoreBPE::encode`, with `encode`'s error checked against Python tiktoken's leftmost-disallowed
 rule), a Unicode sweep (planes 0–2 and 14 in
 six contexts), short random strings around scanner edge cases and the forced whole-piece fallback. It then times
 five jobs: magi count/encode, bpe-openai count/encode and tiktoken encode. Each runs for at least 150 ms in five
 rounds, with rotated order. Figures are median rounds. For tiktoken-rs, which has no separate count, both figures use encode.
+
+`o200k_harmony` (rows `harmony/...`) gets the same exact-ID checks against tiktoken-rs `o200k_harmony_singleton()`.
+bpe-openai has no Harmony tokenizer, and Harmony's ordinary encoding is `o200k_base`'s, so its ordinary workloads are
+checked but not timed. The `special_tokens` workload (256-byte source chunks, each followed by a special token and
+a stray `<|endof`) times `encode_with_special_tokens` and `count_with_special_tokens` against tiktoken-rs for all
+three encodings.
 
 Count throughput in MiB/s, commit `629e2e6` (library code as in `49b9a29`), Rust 1.98.1, `toks` source and both private assets:
 
@@ -513,7 +534,7 @@ MAGI_TOKENIZER_ASSETS=/path/to/assets cargo run --release -p magi-tokenizer-benc
 ```
 
 Publish only if it completes with no failed check and its output lists `fixture_200k` and `session_snapshots` rows
-for both encodings. Record the release commit and that the run passed in the `CHANGELOG.md` entry for the version.
+for every encoding. Record the release commit and that the run passed in the `CHANGELOG.md` entry for the version.
 
 ## Known limitations
 
@@ -521,9 +542,9 @@ for both encodings. Record the release commit and that the run passed in the `CH
   from bytes: about level with bpe-openai, not faster.
 - If no stitch point exists within 4,096 bytes, whole-piece fallback takes 20 bytes of working memory per piece
   byte and about 10 times as long as windows (see [fallback costs](#how-it-works)). No input is known to rule it out.
-- `o200k_harmony` special tokens ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)) and the legacy
-  `r50k_base`, `p50k_base` and `p50k_edit` encodings ([#19](https://github.com/magimetal/magi-tokenizer/issues/19))
-  are not implemented. Model-name routing is left to applications by design ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)).
+- The legacy `r50k_base`, `p50k_base` and `p50k_edit` encodings
+  ([#19](https://github.com/magimetal/magi-tokenizer/issues/19)) are not implemented. Model-name routing is left to
+  applications by design ([#9](https://github.com/magimetal/magi-tokenizer/issues/9)).
 - Encoding takes `&str` only; byte input is left out by decision ([#11](https://github.com/magimetal/magi-tokenizer/issues/11)).
 - The `usize` index path has not been exercised on a real piece of 4 GiB or more.
 - Speed and memory were measured only on ARM64 macOS. CI does not run correctness comparisons; run `bench` locally.

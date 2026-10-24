@@ -6,6 +6,26 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
 
 ## [Unreleased]
 
+### Added
+
+- `o200k_harmony` encoding (`gpt-oss-*`) ([#18](https://github.com/magimetal/magi-tokenizer/issues/18)): module
+  `magi_tokenizer::o200k_harmony` with the same functions as the other encodings. It reuses `o200k_base`'s scanner
+  and tables, so ordinary IDs are identical; its 1,090 special tokens (IDs 199,998–201,087, named tokens plus
+  `<|reserved_{id}|>`) match tiktoken-rs 0.12.0. Named-token constants: `START_OF_TEXT`, `END_OF_TEXT`, `RETURN`,
+  `CONSTRAIN`, `CHANNEL`, `START`, `END`, `MESSAGE`, `CALL`. Cost: 49,552 bytes in a stripped LTO release binary
+  that calls it (ARM64 macOS).
+- `bench` checks `o200k_harmony` exact IDs, counts, decoding, allow-lists and disallowed-special errors against
+  tiktoken-rs on every workload. bpe-openai has no Harmony tokenizer, so Harmony's ordinary workloads are checked,
+  not timed. A new `special_tokens` workload times special-token encoding against tiktoken-rs for all encodings.
+
+### Changed
+
+- Special-token lookup takes the text from `<|` to the next `|>` as the only candidate and binary-searches it for
+  long lists (`o200k_harmony`), instead of comparing every token at each `<|`. `token_bytes` finds special IDs by
+  binary search. Compile-time assertions check that each `SPECIAL_TOKENS` list is sorted by ID and that every
+  token is `<|`…`|>` with no inner `|>`. Interleaved runs show `o200k_base` and `cl100k_base` throughput unchanged
+  within noise, ordinary and special-token.
+
 ### Changed
 
 - README documents the compatibility policy ([#13](https://github.com/magimetal/magi-tokenizer/issues/13)),

@@ -130,13 +130,13 @@ pub mod cl100k_base {
 #[inline]
 fn encode_scanned_into<S: Scanner, V: Vocabulary>(text: &str, tokens: &mut Vec<u32>) {
     for piece in ScannedPieces::<S>::new(text) {
-        bpe::encode_piece::<V>(piece.as_bytes(), tokens);
+        bpe::encode_piece::<V>(piece, tokens);
     }
 }
 
 #[inline]
 fn count_scanned<S: Scanner, V: Vocabulary>(text: &str) -> usize {
-    ScannedPieces::<S>::new(text).map(|piece| bpe::count_piece::<V>(piece.as_bytes())).sum()
+    ScannedPieces::<S>::new(text).map(bpe::count_piece::<V>).sum()
 }
 
 /// Calls `visit` with each ordinary segment and the special token that follows it (None after the last).

@@ -377,29 +377,30 @@ impl<'a> Iterator for Pieces<'a> {
 
 impl core::iter::FusedIterator for Pieces<'_> {}
 
-/// `Pieces` with the scanner fixed at compile time, for the encoding loops.
+/// `Pieces` with the scanner fixed at compile time, for the encoding loops. Yields bytes: piece ends are character
+/// boundaries, so the `str` slicing checks are skipped.
 pub(crate) struct ScannedPieces<'a, S> {
-    text: &'a str,
+    text: &'a [u8],
     pos: usize,
     scanner: PhantomData<S>,
 }
 
 impl<'a, S: Scanner> ScannedPieces<'a, S> {
     pub(crate) fn new(text: &'a str) -> Self {
-        Self { text, pos: 0, scanner: PhantomData }
+        Self { text: text.as_bytes(), pos: 0, scanner: PhantomData }
     }
 }
 
 impl<'a, S: Scanner> Iterator for ScannedPieces<'a, S> {
-    type Item = &'a str;
+    type Item = &'a [u8];
 
     #[inline]
-    fn next(&mut self) -> Option<&'a str> {
+    fn next(&mut self) -> Option<&'a [u8]> {
         if self.pos >= self.text.len() {
             return None;
         }
         let start = self.pos;
-        self.pos = S::piece_end(self.text.as_bytes(), start);
+        self.pos = S::piece_end(self.text, start);
         Some(&self.text[start..self.pos])
     }
 }

@@ -185,32 +185,38 @@ fn long_runs() -> Vec<String> {
         (0..20_000).map(|i| char::from(b'a' + (i * 7 % 26) as u8)).collect(),
     ]
 }
+/// Random text of at least `len` bytes from `alphabet`, advancing the xorshift `state`.
+fn random_text(state: &mut u64, len: usize, alphabet: &[&str]) -> String {
+    let mut text = String::new();
+    while text.len() < len {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        text.push_str(alphabet[(*state % alphabet.len() as u64) as usize]);
+    }
+    text
+}
+
 /// Pieces that defeat window reuse: long random text from small alphabets. Stitch points are found quickly,
 /// but every window is new, so the cache never hits. These are the workloads where window merging costs the most.
 fn long_unrepeated_pieces() -> Vec<String> {
     let mut state = 0x7777_1111_2222_3333u64;
-    let mut next = move || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
-    let mut random_text = |len: usize, alphabet: &[&str]| {
-        let mut text = String::new();
-        while text.len() < len {
-            text.push_str(alphabet[(next() % alphabet.len() as u64) as usize]);
-        }
-        text
-    };
     let mut texts = vec![
-        random_text(200_000, &["a", "b"]),
-        random_text(240_000, &["你", "好", "世", "界", "的", "是", "在", "了"]),
-        random_text(200_000, &["!", "=", "-", "*", "(", ")", "{", "}", ";", "."]),
+        random_text(&mut state, 200_000, &["a", "b"]),
+        random_text(&mut state, 240_000, &["你", "好", "世", "界", "的", "是", "在", "了"]),
+        random_text(&mut state, 200_000, &["!", "=", "-", "*", "(", ")", "{", "}", ";", "."]),
     ];
     for len in (129..1024).step_by(7) {
-        texts.push(random_text(len, &["a", "b"]));
+        texts.push(random_text(&mut state, len, &["a", "b"]));
     }
     texts
+}
+
+/// One long unrepeated piece of CJK characters that 0.0.2 started merging as separate bytes in both encodings
+/// (#14), so every window merges them fresh.
+fn random_cjk_ineligible() -> Vec<String> {
+    let alphabet = ["些", "介", "传", "你", "供", "像", "力", "参"];
+    vec![random_text(&mut 0x1414_1414_1414_1414u64, 240_000, &alphabet)]
 }
 
 // ---- benchmarks -----------------------------------------------------------------------------------------
@@ -400,6 +406,7 @@ fn bench(filter: Option<&str>) -> Result<()> {
         ("scanner_edges", scanner_edge_cases()),
         ("long_runs", long_runs()),
         ("long_unrepeated", long_unrepeated_pieces()),
+        ("random_cjk_ineligible", random_cjk_ineligible()),
     ];
     if let Some(fixture) = fixture_200k()? {
         workloads.insert(0, ("fixture_200k", vec![fixture]));

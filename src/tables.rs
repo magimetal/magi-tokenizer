@@ -21,6 +21,7 @@ pub(crate) trait Vocabulary {
     fn pair_table() -> &'static [u64];
     fn byte_pair_ranks() -> &'static [u32];
     fn premerged_char_tokens() -> &'static [u32];
+    fn continuation_lead_ranks() -> &'static [u32];
 }
 
 /// Includes the tables build.rs generated for one encoding and implements `Vocabulary` for `$vocabulary`.
@@ -67,6 +68,10 @@ macro_rules! generated_vocabulary {
             #[inline(always)]
             fn premerged_char_tokens() -> &'static [u32] {
                 $module::PREMERGED_CHAR_TOKENS
+            }
+            #[inline(always)]
+            fn continuation_lead_ranks() -> &'static [u32] {
+                $module::CONTINUATION_LEAD_RANKS
             }
         }
     };
@@ -177,9 +182,10 @@ pub(crate) fn premerged_char<V: Vocabulary>(piece: &[u8], at: usize) -> Option<(
         _ => return None,
     };
     let continuation = piece.get(at + 1..at + len)?;
+    let next = piece.get(at + len).copied();
     if !continuation.iter().all(|&byte| is_continuation_byte(byte))
         || (at > 0 && !is_continuation_byte(piece[at - 1]))
-        || piece.get(at + len).is_some_and(|&byte| !starts_multibyte_sequence(byte))
+        || next.is_some_and(|byte| !starts_multibyte_sequence(byte))
     {
         return None;
     }
@@ -190,5 +196,10 @@ pub(crate) fn premerged_char<V: Vocabulary>(piece: &[u8], at: usize) -> Option<(
         return None;
     }
     let id = V::premerged_char_tokens()[code_point];
-    (id != 0).then_some((id, len))
+    // A token joining the last byte to the next character must rank above the character's own token, its last
+    // merge.
+    let joins_next_first = next.is_some_and(|lead| {
+        V::continuation_lead_ranks()[((code_point & 0x3F) << 6) | (lead & 0x3F) as usize] < id
+    });
+    (id != 0 && !joins_next_first).then_some((id, len))
 }

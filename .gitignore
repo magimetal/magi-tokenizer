@@ -1,3 +1,5 @@
 /target/
 /tools/gen-unicode/target/
 .DS_Store
+# Private benchmark inputs for MAGI_TOKENIZER_ASSETS; never commit (session transcripts).
+/.bench-assets/

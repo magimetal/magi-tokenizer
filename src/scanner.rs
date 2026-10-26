@@ -79,6 +79,7 @@ const PUNCTUATION: u8 = 0;
 const LETTER: u8 = 1;
 const NUMBER: u8 = 2;
 const SPACE: u8 = 3;
+const NEWLINE: u8 = 4;
 /// `[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]`
 const UPPER: u8 = 0x08;
 /// `[\p{Ll}\p{Lm}\p{Lo}\p{M}]`
@@ -223,7 +224,6 @@ fn whitespace_end(text: &[u8], pos: usize) -> usize {
         last_start
     }
 }
-const NEWLINE: u8 = 4;
 
 /// End of `\p{N}{1,3}` whose first atom ends at `second`.
 #[inline(always)]

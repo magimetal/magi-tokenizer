@@ -172,11 +172,12 @@ Each returns the matching encode function's length without storing a token list.
 
 Cap input size before calling the library. There is no memory-limit setting.
 
-Encoding allocates 4 bytes per output token. The whole-piece fallback allocates its working memory once:
-exactly 20 bytes per piece byte, with O(n log n) runtime
+Encoding allocates 4 bytes per output token, reserving one token per 3 input bytes up front. The whole-piece
+fallback allocates its working memory once: exactly 20 bytes per piece byte (32 for pieces of 4 GiB and more on
+64-bit targets), with O(n log n) runtime
 ([#12](https://github.com/magimetal/magi-tokenizer/issues/12)). Measured peak memory was 21 to 22 bytes per piece byte,
 including input. No tested input reaches fallback naturally, but there is no known input condition that rules it out.
-An input cap of N bytes bounds fallback working memory at 20 × N bytes.
+An input cap of N bytes bounds fallback working memory at 20 × N bytes, or 32 × N for N of 4 GiB and more.
 
 ### Binary size and build time
 
@@ -316,7 +317,7 @@ the same program calling `o200k_base`.
 Functions don't panic or loop forever on any `&str` or `u32` token ID, except at these resource limits:
 
 - Out of memory aborts the process. `catch_unwind` cannot catch it. Encoding allocates by token count,
-  and whole-piece fallback allocates 20 bytes per piece byte.
+  and whole-piece fallback allocates 20 bytes per piece byte (32 for pieces of 4 GiB and more on 64-bit targets).
 - On 32-bit targets, inputs or pieces of several hundred MiB can request buffers larger than `isize::MAX`,
   which panics. On 64-bit targets, allocation fails first.
 
@@ -458,7 +459,7 @@ pair table were designed for magi-tokenizer.
 5. If there is no stitch point, double the window and retry, up to 4,096 bytes. If that also fails, merge the whole piece.
 6. After a successful stitch, return to 128-byte windows. Difficult stretches are usually local; each window costs a few microseconds without special data structures.
 
-A 16-slot cache reuses window encodings within each call. A hash match still requires a full byte comparison,
+A 16-slot cache reuses window encodings within each piece. A hash match still requires a full byte comparison,
 so collisions cannot change the result. Repetitive input such as `"!@#$%^&*()" × N` reuses merges at each phase
 of its period. Window size affects alignment: on `long_runs`, 128 bytes beat 64; 48 and 96 were about six times slower.
 
@@ -470,11 +471,13 @@ Every 4,096 pending tokens, the encoder appends final tokens to its output. The 
 
 Window working memory does not grow with piece length: at most 64 KiB of cached bytes, plus a few hundred KiB
 for merge state and pending tokens. Usually it takes a few KiB. These estimates exclude allocator overhead.
+One call allocates these buffers once and reuses them for every later long piece.
 Whole-piece fallback is the exception: it discards prior output for that piece and allocates by piece length.
 
 Fallback allocates five `u32` arrays once, each as long as the piece: tokens, two links, ranks and a tournament tree.
 The tree selects the lowest rank, breaking ties to the left. This costs exactly 20 bytes of working memory per
-piece byte, regardless of content. Each merge updates at most three tree paths, giving O(n log n) runtime.
+piece byte, regardless of content; pieces of 4 GiB and more on 64-bit targets use `usize` links and indices,
+32 bytes per piece byte. Each merge updates at most three tree paths, giving O(n log n) runtime.
 The older binary heap kept stale entries, so its peak memory depended on content
 ([#12](https://github.com/magimetal/magi-tokenizer/issues/12)).
 
@@ -614,6 +617,33 @@ ranks below the character. Before that lead byte, the character must still start
 `参` stays ineligible since `参数` ranks below it.
 For `o200k_base`, `long_unrepeated` includes random CJK and rose from 68.6 to 76.0 MiB/s.
 Other workloads stayed within run-to-run variation.
+
+</details>
+
+### Allow-lists and long pieces
+
+`encode`, `count`, `encode_allowing_special` and `count_allowing_special` look up the allow-list once per call,
+when they meet the first special-token text, instead of scanning it for every candidate. `encode` and `count`
+reuse that lookup for their disallowed-token check. Long pieces reuse window buffers across one call.
+
+<details>
+<summary>Measurements before and after</summary>
+
+A separate probe, not in this repository, measured the best of 30 calls on ARM64 macOS (release, fat LTO).
+Token counts were identical before and after.
+
+| Input and call | before | after |
+| --- | ---: | ---: |
+| 1.2 MB special-dense `o200k_harmony` text, `count` with all 1,090 names allowed | 55.9 ms | 8.2 ms |
+| Same text, `count_allowing_special` with all names | 28.2 ms | 5.0 ms |
+| Same text, `count_with_special_tokens` (no allow-list) | 4.2 ms | 4.9 ms |
+| 4,000 `o200k_base` pieces of 129 to 192 bytes, `count_ordinary` allocations | 31,510 | 92 |
+| Same pieces, `count_ordinary` time | 12.1 ms | 11.6 ms |
+| This repository's `src/`, `encode_ordinary` allocations | 3 | 2 |
+
+The source text measured 0.28 tokens per byte, above the old reservation of one token per 4 bytes, so the
+token list grew once during encoding. `fixture_200k` and `session_snapshots` stayed within run-to-run variation
+for every encoding: they are ordinary text with no allow-list and few pieces over 128 bytes.
 
 </details>
 

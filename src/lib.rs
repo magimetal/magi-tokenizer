@@ -39,7 +39,7 @@ macro_rules! encoding_api {
 
         /// Encodes `text`, treating special-token text as ordinary text (tiktoken `encode_ordinary`).
         pub fn encode_ordinary(text: &str) -> Vec<u32> {
-            let mut tokens = Vec::with_capacity(text.len() / 4 + 4);
+            let mut tokens = Vec::with_capacity(crate::token_capacity_for(text));
             encode_ordinary_into(text, &mut tokens);
             tokens
         }
@@ -50,7 +50,8 @@ macro_rules! encoding_api {
         }
 
         /// Number of tokens `encode_ordinary(text)` returns, without building the token list. Working memory per
-        /// piece is bounded, except when a long piece falls back to the whole-piece merge (20 bytes per piece byte).
+        /// piece is bounded, except when a long piece falls back to the whole-piece merge (20 bytes per piece byte,
+        /// or 32 for pieces of 4 GiB and more on 64-bit targets).
         pub fn count_ordinary(text: &str) -> usize {
             crate::count_scanned::<$scanner, $vocabulary>(text)
         }
@@ -68,29 +69,44 @@ macro_rules! encoding_api {
         /// Encodes `text`, recognizing only the special tokens in `allowed_special`; other special-token text is
         /// encoded as ordinary text (tiktoken-rs `CoreBPE::encode(text, allowed_special)`).
         pub fn encode_allowing_special(text: &str, allowed_special: &[&str]) -> Vec<u32> {
-            encode_with_allowed_special(text, |name| allowed_special.contains(&name))
+            let mut allowed = crate::AllowedSpecial::new(&SPECIAL, allowed_special);
+            encode_with_allowed_special(text, |index| allowed.contains(index))
         }
 
         /// Number of tokens `encode_allowing_special(text, allowed_special)` returns.
         pub fn count_allowing_special(text: &str, allowed_special: &[&str]) -> usize {
-            count_with_allowed_special(text, |name| allowed_special.contains(&name))
+            let mut allowed = crate::AllowedSpecial::new(&SPECIAL, allowed_special);
+            count_with_allowed_special(text, |index| allowed.contains(index))
         }
 
         /// Python tiktoken's default `encode(text, allowed_special=...)`: an error for the leftmost special-token
         /// text not in `allowed_special`, otherwise `encode_allowing_special(text, allowed_special)`.
+        ///
+        /// # Errors
+        ///
+        /// [`DisallowedSpecialToken`](crate::DisallowedSpecialToken) for the leftmost special-token text in `text`
+        /// that `allowed_special` does not name.
         pub fn encode(text: &str, allowed_special: &[&str]) -> Result<Vec<u32>, crate::DisallowedSpecialToken> {
-            crate::reject_disallowed_special(text, &SPECIAL, allowed_special)?;
-            Ok(encode_allowing_special(text, allowed_special))
+            let mut allowed = crate::AllowedSpecial::new(&SPECIAL, allowed_special);
+            crate::reject_disallowed_special(text, &SPECIAL, &mut allowed)?;
+            Ok(encode_with_allowed_special(text, |index| allowed.contains(index)))
         }
 
         /// Number of tokens `encode(text, allowed_special)` returns, or its error.
+        ///
+        /// # Errors
+        ///
+        /// [`DisallowedSpecialToken`](crate::DisallowedSpecialToken) for the leftmost special-token text in `text`
+        /// that `allowed_special` does not name.
         pub fn count(text: &str, allowed_special: &[&str]) -> Result<usize, crate::DisallowedSpecialToken> {
-            crate::reject_disallowed_special(text, &SPECIAL, allowed_special)?;
-            Ok(count_allowing_special(text, allowed_special))
+            let mut allowed = crate::AllowedSpecial::new(&SPECIAL, allowed_special);
+            crate::reject_disallowed_special(text, &SPECIAL, &mut allowed)?;
+            Ok(count_with_allowed_special(text, |index| allowed.contains(index)))
         }
 
-        fn encode_with_allowed_special(text: &str, is_allowed: impl Fn(&str) -> bool) -> Vec<u32> {
-            let mut tokens = Vec::with_capacity(text.len() / 4 + 4);
+        /// `is_allowed` receives the special token's index in `SPECIAL_TOKENS`.
+        fn encode_with_allowed_special(text: &str, is_allowed: impl FnMut(usize) -> bool) -> Vec<u32> {
+            let mut tokens = Vec::with_capacity(crate::token_capacity_for(text));
             crate::for_each_special_split(text, &SPECIAL, is_allowed, |segment, special| {
                 encode_ordinary_into(segment, &mut tokens);
                 tokens.extend(special);
@@ -98,10 +114,11 @@ macro_rules! encoding_api {
             tokens
         }
 
-        fn count_with_allowed_special(text: &str, is_allowed: impl Fn(&str) -> bool) -> usize {
+        /// `is_allowed` receives the special token's index in `SPECIAL_TOKENS`.
+        fn count_with_allowed_special(text: &str, is_allowed: impl FnMut(usize) -> bool) -> usize {
             let mut count = 0;
             crate::for_each_special_split(text, &SPECIAL, is_allowed, |segment, special| {
-                count += count_ordinary(segment) + special.is_some() as usize
+                count += count_ordinary(segment) + usize::from(special.is_some());
             });
             count
         }
@@ -231,16 +248,24 @@ pub mod p50k_edit {
     encoding_api!("p50k_edit", crate::scanner::R50kScanner, crate::tables::P50kBaseVocabulary);
 }
 
+/// Initial capacity for encoding `text`: one token per three bytes, above the 0.28 tokens per byte measured on
+/// source code, so typical text never regrows the list.
+fn token_capacity_for(text: &str) -> usize {
+    text.len() / 3 + 4
+}
+
 #[inline]
 fn encode_scanned_into<S: Scanner, V: Vocabulary>(text: &str, tokens: &mut Vec<u32>) {
+    let mut buffers = bpe::WindowBuffers::default();
     for piece in ScannedPieces::<S>::new(text) {
-        bpe::encode_piece::<V>(piece, tokens);
+        bpe::encode_piece::<V>(piece, tokens, &mut buffers);
     }
 }
 
 #[inline]
 fn count_scanned<S: Scanner, V: Vocabulary>(text: &str) -> usize {
-    ScannedPieces::<S>::new(text).map(bpe::count_piece::<V>).sum()
+    let mut buffers = bpe::WindowBuffers::default();
+    ScannedPieces::<S>::new(text).map(|piece| bpe::count_piece::<V>(piece, &mut buffers)).sum()
 }
 
 /// Special-token text that `encode` or `count` found but was not allowed, like Python tiktoken's `ValueError`.
@@ -294,19 +319,26 @@ impl SpecialTokens {
         Self { by_id, text_order, longest_text }
     }
 
-    /// The special token whose text starts at byte `start` of `text`, which holds `<|`, as (text, id).
+    /// Index in `by_id` of the special token whose text starts at byte `start` of `text`, which holds `<|`.
     #[inline]
-    fn starting_at(&self, text: &str, start: usize) -> Option<(&'static str, u32)> {
+    fn starting_at(&self, text: &str, start: usize) -> Option<usize> {
         let rest = &text[start..];
         if self.text_order.is_empty() {
-            return self.by_id.iter().find(|&&(name, _)| rest.starts_with(name)).copied();
+            return self.by_id.iter().position(|&(name, _)| rest.starts_with(name));
         }
         let window = &rest.as_bytes()[2..rest.len().min(self.longest_text)];
         let close = window.windows(2).position(|pair| pair == b"|>")?;
         // `>` is ASCII, so the end is a char boundary.
-        let candidate = &rest[..2 + close + 2];
-        let found = self.text_order.binary_search_by(|&index| self.by_id[index as usize].0.cmp(candidate)).ok()?;
-        Some(self.by_id[self.text_order[found] as usize])
+        self.index_of(&rest[..2 + close + 2])
+    }
+
+    /// Index in `by_id` of the special token whose text is exactly `name`.
+    fn index_of(&self, name: &str) -> Option<usize> {
+        if self.text_order.is_empty() {
+            return self.by_id.iter().position(|&(text, _)| text == name);
+        }
+        let found = self.text_order.binary_search_by(|&index| self.by_id[index as usize].0.cmp(name)).ok()?;
+        Some(self.text_order[found] as usize)
     }
 
     fn text_of(&self, id: u32) -> Option<&'static str> {
@@ -315,18 +347,45 @@ impl SpecialTokens {
     }
 }
 
-/// First special token at or after byte `pos` for which `is_allowed` holds, as (start, text, id).
+/// The special tokens an `allowed_special` list names, by index in `SpecialTokens::by_id`. Resolved when the first
+/// special-token text is checked, so text without any allocates nothing, and each check is one lookup instead of a
+/// scan of the list.
+struct AllowedSpecial<'a> {
+    special: &'a SpecialTokens,
+    names: &'a [&'a str],
+    allowed_by_index: Option<Vec<bool>>,
+}
+
+impl<'a> AllowedSpecial<'a> {
+    fn new(special: &'a SpecialTokens, names: &'a [&'a str]) -> Self {
+        Self { special, names, allowed_by_index: None }
+    }
+
+    fn contains(&mut self, index: usize) -> bool {
+        let (special, names) = (self.special, self.names);
+        self.allowed_by_index.get_or_insert_with(|| {
+            let mut allowed = vec![false; special.by_id.len()];
+            for index in names.iter().filter_map(|name| special.index_of(name)) {
+                allowed[index] = true;
+            }
+            allowed
+        })[index]
+    }
+}
+
+/// First special token at or after byte `pos` whose index `is_allowed` accepts, as (start, text, id).
 fn find_special_token(
     text: &str,
     mut pos: usize,
     special: &SpecialTokens,
-    is_allowed: impl Fn(&str) -> bool,
+    mut is_allowed: impl FnMut(usize) -> bool,
 ) -> Option<(usize, &'static str, u32)> {
     while let Some(offset) = text[pos..].find("<|") {
         let start = pos + offset;
-        if let Some((name, id)) = special.starting_at(text, start)
-            && is_allowed(name)
+        if let Some(index) = special.starting_at(text, start)
+            && is_allowed(index)
         {
+            let (name, id) = special.by_id[index];
             return Some((start, name, id));
         }
         pos = start + 2;
@@ -338,24 +397,24 @@ fn find_special_token(
 fn for_each_special_split(
     text: &str,
     special: &SpecialTokens,
-    is_allowed: impl Fn(&str) -> bool,
+    mut is_allowed: impl FnMut(usize) -> bool,
     mut visit: impl FnMut(&str, Option<u32>),
 ) {
     let mut segment_start = 0;
-    while let Some((start, name, id)) = find_special_token(text, segment_start, special, &is_allowed) {
+    while let Some((start, name, id)) = find_special_token(text, segment_start, special, &mut is_allowed) {
         visit(&text[segment_start..start], Some(id));
         segment_start = start + name.len();
     }
     visit(&text[segment_start..], None);
 }
 
-/// Error for the leftmost special token in `text` that is not in `allowed_special`.
+/// Error for the leftmost special token in `text` that `allowed` does not contain.
 fn reject_disallowed_special(
     text: &str,
     special: &SpecialTokens,
-    allowed_special: &[&str],
+    allowed: &mut AllowedSpecial<'_>,
 ) -> Result<(), DisallowedSpecialToken> {
-    match find_special_token(text, 0, special, |name| !allowed_special.contains(&name)) {
+    match find_special_token(text, 0, special, |index| !allowed.contains(index)) {
         Some((position, token, _)) => Err(DisallowedSpecialToken { token, position }),
         None => Ok(()),
     }

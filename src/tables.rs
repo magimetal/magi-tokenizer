@@ -2,7 +2,10 @@
 // by bytes and merge lookup by token pair. Lookups are generic over the vocabulary, so each encoding gets its own
 // copy with its table addresses and sizes as constants.
 
-use crate::table_hash::*;
+use crate::table_hash::{
+    INLINE_TOKEN_BYTES, MAX_TOKEN_BYTES, PAIR_EMPTY_SLOT, PAIR_ID_BITS, VOCAB_SLOT_ID_MASK, VOCAB_SLOT_ID_SHIFT,
+    VOCAB_SLOT_LEN_SHIFT, is_continuation_byte, pair_key, pair_slot_for, starts_multibyte_sequence, vocab_slot_for,
+};
 
 /// Forces 64-byte alignment on embedded table images so they can be viewed as u32/u64 arrays.
 #[repr(C, align(64))]
@@ -119,11 +122,11 @@ fn load_le_padded(bytes: &[u8]) -> u64 {
     if len >= 8 {
         u64::from_le_bytes(bytes[..8].try_into().unwrap())
     } else if len >= 4 {
-        let low = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as u64;
-        let high = u32::from_le_bytes(bytes[len - 4..len].try_into().unwrap()) as u64;
+        let low = u64::from(u32::from_le_bytes(bytes[..4].try_into().unwrap()));
+        let high = u64::from(u32::from_le_bytes(bytes[len - 4..len].try_into().unwrap()));
         low | high << (8 * (len - 4))
     } else if len > 0 {
-        bytes[0] as u64 | (bytes[len / 2] as u64) << (8 * (len / 2)) | (bytes[len - 1] as u64) << (8 * (len - 1))
+        u64::from(bytes[0]) | u64::from(bytes[len / 2]) << (8 * (len / 2)) | u64::from(bytes[len - 1]) << (8 * (len - 1))
     } else {
         0
     }
@@ -146,7 +149,7 @@ pub(crate) fn token_id_for_bytes<V: Vocabulary>(bytes: &[u8]) -> Option<u32> {
     }
     let head = load_le_padded(bytes);
     let tail = if len > 8 { load_le_padded(&bytes[8..len.min(INLINE_TOKEN_BYTES)]) as u32 } else { 0 };
-    let expected = tail as u64 | (len as u64) << VOCAB_SLOT_LEN_SHIFT;
+    let expected = u64::from(tail) | (len as u64) << VOCAB_SLOT_LEN_SHIFT;
     let (table, slot_mask) = (V::vocab_table(), (1 << V::VOCAB_TABLE_BITS) - 1);
     let mut slot = vocab_slot_for(head, tail, len, V::VOCAB_TABLE_BITS);
     loop {

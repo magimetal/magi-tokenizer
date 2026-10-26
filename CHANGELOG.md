@@ -6,6 +6,22 @@ Notable changes to magi-tokenizer. Versions are published on [crates.io](https:/
 
 ## [Unreleased]
 
+### Changed
+
+- `encode`, `count`, `encode_allowing_special` and `count_allowing_special` resolve the allow-list once per call,
+  and `encode`/`count` no longer re-scan it when checking specials. Special-dense `o200k_harmony` text with every
+  name allowed: `count` 55.9 → 8.2 ms and `count_allowing_special` 28.2 → 5.0 ms on 1.2 MB.
+- Long pieces (over 128 bytes) reuse window buffers across one call: 4,000 pieces of 129 to 192 bytes made 31,510
+  allocations, now 92.
+- Encoding reserves one token per 3 bytes instead of 4, so source-like text (0.28 tokens per byte) no longer
+  regrows the token list.
+- Token IDs and counts are unchanged: the full `bench` with `MAGI_TOKENIZER_ASSETS` set passed on top of `096b54a`
+  (Rust 1.98.1, Apple M5 Pro). `fixture_200k` and `session_snapshots` stayed within run-to-run variation.
+- README gains an "Allow-lists and long pieces" measurement section. `count_ordinary`, the README memory limits and
+  the fallback description document the 32 bytes-per-byte fallback for pieces of 4 GiB and more on 64-bit targets;
+  `encode` and `count` document their errors.
+- `.gitignore` excludes `/.bench-assets/`, a local home for the private benchmark inputs.
+
 ## [0.1.0] - 2026-10-24
 
 First release under the README's [compatibility policy](README.md#compatibility). Release check: the full,

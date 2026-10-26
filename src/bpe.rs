@@ -25,22 +25,22 @@ const _: () = {
     assert!(FIRST_WINDOW_BYTES >= SHORT_PIECE_BYTES && MAX_WINDOW_BYTES <= u32::MAX as usize);
 };
 
-/// Appends the tokens of `piece` to `out`.
+/// Appends the tokens of `piece` to `out`. `buffers` is scratch space reused across the pieces of one text.
 #[inline]
-pub(crate) fn encode_piece<V: Vocabulary>(piece: &[u8], out: &mut Vec<u32>) {
+pub(crate) fn encode_piece<V: Vocabulary>(piece: &[u8], out: &mut Vec<u32>, buffers: &mut WindowBuffers) {
     if piece.len() <= SHORT_PIECE_BYTES {
         encode_short_piece::<V>(piece, out);
     } else {
-        encode_long_piece::<V>(piece, out);
+        encode_long_piece::<V>(piece, out, buffers);
     }
 }
 
 /// Number of tokens `piece` encodes to. Long pieces are counted in bounded memory unless the whole-piece fallback runs.
 #[inline]
-pub(crate) fn count_piece<V: Vocabulary>(piece: &[u8]) -> usize {
+pub(crate) fn count_piece<V: Vocabulary>(piece: &[u8], buffers: &mut WindowBuffers) -> usize {
     if piece.len() > SHORT_PIECE_BYTES {
         let mut count = 0;
-        if !merge_in_windows::<V>(piece, |tokens| count += tokens.len()) {
+        if !merge_in_windows::<V>(piece, buffers, |tokens| count += tokens.len()) {
             #[cfg(feature = "harness")]
             crate::harness::record_fallback();
             count = 0;
@@ -65,9 +65,9 @@ fn encode_short_piece<V: Vocabulary>(piece: &[u8], out: &mut Vec<u32>) {
     }
 }
 
-fn encode_long_piece<V: Vocabulary>(piece: &[u8], out: &mut Vec<u32>) {
+fn encode_long_piece<V: Vocabulary>(piece: &[u8], out: &mut Vec<u32>, buffers: &mut WindowBuffers) {
     let base = out.len();
-    if !merge_in_windows::<V>(piece, |tokens| out.extend_from_slice(tokens)) {
+    if !merge_in_windows::<V>(piece, buffers, |tokens| out.extend_from_slice(tokens)) {
         #[cfg(feature = "harness")]
         crate::harness::record_fallback();
         out.truncate(base);
@@ -81,6 +81,16 @@ const REACH_BACK_BYTES: usize = MAX_WINDOW_BYTES / OVERLAP_DIVISOR + SHORT_PIECE
 /// Pending tokens are checked for final ones once there are this many.
 const COMMIT_BATCH_TOKENS: usize = 4096;
 
+/// Scratch space of `merge_in_windows`, kept across the long pieces of one text so each piece reuses the
+/// allocations of the ones before it instead of making its own.
+#[derive(Default)]
+pub(crate) struct WindowBuffers {
+    /// Tokens not yet committed, with the end offset in the piece of each.
+    tokens: Vec<u32>,
+    ends: Vec<usize>,
+    cache: [MergedWindow; WINDOW_CACHE_SLOTS],
+}
+
 /// Passes the exact encoding of a long piece to `commit`, in order and in batches, as overlapping windows each
 /// merged on their own. If the encoding built so far and the next window's encoding contain the same token at the
 /// same position, the encoding so far up to that token followed by the window's tokens after it is the exact
@@ -90,13 +100,20 @@ const COMMIT_BATCH_TOKENS: usize = 4096;
 ///
 /// Returns false when a stretch has no stitch point within MAX_WINDOW_BYTES. A prefix may already have been
 /// committed; the caller discards it and merges the whole piece instead.
-pub(crate) fn merge_in_windows<V: Vocabulary>(piece: &[u8], mut commit: impl FnMut(&[u32])) -> bool {
-    // Tokens not yet committed, with the end offset in `piece` of each. Only the stretch after a window's start is
-    // ever replaced, and windows start at or after `committed_end`.
-    let mut tokens: Vec<u32> = Vec::new();
-    let mut ends: Vec<usize> = Vec::new();
+pub(crate) fn merge_in_windows<V: Vocabulary>(
+    piece: &[u8],
+    buffers: &mut WindowBuffers,
+    mut commit: impl FnMut(&[u32]),
+) -> bool {
+    // Only the stretch of pending tokens after a window's start is ever replaced, and windows start at or after
+    // `committed_end`. Cached ranges index an earlier piece, so they are emptied: an empty range never matches.
+    let WindowBuffers { tokens, ends, cache } = buffers;
+    tokens.clear();
+    ends.clear();
+    for merged in cache.iter_mut() {
+        merged.range = 0..0;
+    }
     let mut committed_end = 0;
-    let mut cache: [MergedWindow; WINDOW_CACHE_SLOTS] = Default::default();
     let mut window_bytes = FIRST_WINDOW_BYTES;
     let mut done = 0;
     #[cfg(feature = "harness")]
@@ -124,7 +141,7 @@ pub(crate) fn merge_in_windows<V: Vocabulary>(piece: &[u8], mut commit: impl FnM
             merge_window::<V>(bytes, &mut merged.tokens, &mut merged.ends);
             merged.range = window.clone();
         }
-        match find_shared_token(&tokens, &ends, start, &merged.tokens, &merged.ends) {
+        match find_shared_token(tokens, ends, start, &merged.tokens, &merged.ends) {
             Some((done_index, window_index)) => {
                 tokens.truncate(done_index + 1);
                 ends.truncate(done_index + 1);
@@ -160,7 +177,7 @@ pub(crate) fn merge_in_windows<V: Vocabulary>(piece: &[u8], mut commit: impl FnM
             }
         }
     }
-    commit(&tokens);
+    commit(tokens);
     true
 }
 
@@ -184,7 +201,7 @@ fn window_cache_slot(bytes: &[u8]) -> usize {
         hash = (hash.rotate_left(5) ^ u64::from_le_bytes(*chunk)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
     for &byte in remainder {
-        hash = (hash.rotate_left(5) ^ byte as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        hash = (hash.rotate_left(5) ^ u64::from(byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
     (hash >> 60) as usize % WINDOW_CACHE_SLOTS
 }

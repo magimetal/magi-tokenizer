@@ -1,30 +1,33 @@
 <!-- Generated repository guidance; keep aligned with source and build configuration. -->
 # Repository guidance
 
-## Scope and purpose
+## Scope and structure
 - Applies throughout this repository unless a nearer `AGENTS.md` overrides it.
-- `magi-tokenizer` is a dependency-free Rust implementation of the `o200k_base`, `o200k_harmony`, `cl100k_base`, `r50k_base`, `p50k_base` and `p50k_edit` tokenizers.
+- `magi-tokenizer` is a dependency-free Rust implementation of `o200k_base`, `o200k_harmony`, `cl100k_base`, `r50k_base`, `p50k_base`, and `p50k_edit`.
 - Library crate: `magi_tokenizer`; Rust edition 2024, minimum Rust 1.88.
-- `o200k_base` always builds and is re-exported at the crate root; `o200k_harmony` always builds and reuses `o200k_base` tables; `cl100k_base` is behind feature `cl100k_base`; `r50k_base` is behind feature `r50k_base`; `p50k_base` and `p50k_edit` share tables behind feature `p50k_base`.
+- `o200k_base` always builds and is re-exported at the crate root; `o200k_harmony` always builds and shares its tables and scanner.
+- `cl100k_base` and `r50k_base` each require their namesake feature; `p50k_base` and `p50k_edit` share tables behind feature `p50k_base`.
+- Keep the library and build script dependency-free. `bench/` isolates benchmark dependencies as an unpublished workspace member; `tools/gen-unicode/` is an unpublished standalone package excluded from the workspace.
 - Do not imply model routing (#9).
 
 ## Source map
-- `src/lib.rs`: public encoding, counting, decoding, and piece APIs.
-- `src/scanner.rs`: handwritten o200k, cl100k and r50k/p50k scanners matching the reference regex behavior.
-- `src/bpe.rs`: byte-pair merging, windowed encoding, and whole-piece fallback.
-- `src/tables.rs` and `src/table_hash.rs`: runtime table access and shared hashing.
-- `src/unicode_classes.rs`: generated Unicode classification tables.
-- `src/harness.rs`: unstable memory-benchmark instrumentation behind feature `harness`.
-- `build.rs`: vocabulary processing and build-time table generation.
-- `assets/<encoding>.tiktoken`: source vocabularies.
-- `bench/`: isolated benchmark dependencies; workspace member, not published.
-- `tools/gen-unicode/`: standalone generator, excluded from the root workspace.
-- `.github/workflows/ci.yml`: authoritative CI configuration.
-- `README.md`: architecture and performance; `CHANGELOG.md`: release history.
-- `docs/archive/magi-code-pilot.md`: historical material, not current guidance.
+| Location | Responsibility |
+| --- | --- |
+| `src/lib.rs` | Public encoding, counting, decoding, and piece APIs |
+| `src/scanner.rs` | Handwritten scanners matching reference regex behavior |
+| `src/bpe.rs` | Byte-pair merging, windowed encoding, and whole-piece fallback |
+| `src/tables.rs`, `src/table_hash.rs` | Runtime table access and shared hashing |
+| `src/unicode_classes.rs` | Generated Unicode classification tables |
+| `src/harness.rs` | Unstable memory-benchmark instrumentation behind feature `harness` |
+| `build.rs`, `assets/*.tiktoken` | Vocabulary processing, table generation, and source vocabularies |
+| `bench/src/main.rs` | Compatibility checks, timing, startup, and memory measurements |
+| `tools/gen-unicode/src/main.rs` | Unicode table generator |
+| `.github/workflows/ci.yml` | Authoritative CI configuration |
+| `README.md`, `CHANGELOG.md`, `NOTICE` | Architecture/performance, release history, and attribution |
+| `docs/archive/magi-code-pilot.md` | Historical material, not current guidance |
 
-## Useful commands
-Run from repository root unless shown otherwise. Run only commands relevant to the change.
+## Commands and verification
+Run from repository root unless shown otherwise; select commands relevant to the change.
 
 ```sh
 cargo build --release -p magi-tokenizer
@@ -35,46 +38,54 @@ cargo run --release -p magi-tokenizer-bench -- memory 64 count window
 (cd tools/gen-unicode && cargo run --release)
 ```
 
-- `bench` accepts substring filters, for example `bench long`.
-- `memory` takes `<MiB> <count|encode> <window|fallback>`.
+- `bench` accepts substring filters by encoding or workload, for example `bench long`.
+- Run the release benchmark after scanner or merge changes: before timing it checks exact tiktoken-rs IDs, counts, decoding, specials, and allowlists, including a Unicode sweep and forced fallback.
+- `startup` accepts `magi`, `tiktoken`, or `bpe-openai`; use a fresh process for each measurement. `memory` takes `<MiB> <count|encode> <window|fallback>`.
 - Benchmark tooling uses newer stable APIs than the library's minimum Rust version.
-- Run Unicode generation only for intentional Unicode-table changes.
+- CI builds defaults and individual features on Rust 1.88.0 and 1.90.0, and runs release workspace Clippy on Linux, macOS, and Windows across x86 and ARM targets.
+- CI also builds i686 with all encoding features and big-endian s390x with `r50k_base,p50k_base`; CI does not run benchmark comparisons.
 
 ## Public API boundaries
 - Public text inputs are `&str`; internal BPE operations support arbitrary bytes.
-- Ordinary encoding treats special-token spellings as ordinary text.
-- Special-token APIs recognize each module's `SPECIAL_TOKENS`: o200k 199999/200018; o200k_harmony 199998–201087 (named + `<|reserved_{id}|>`, generated by `build.rs`); cl100k 100257–100260/100276; r50k/p50k 50256; p50k_edit 50256/50281–50283.
-- `p50k_base` has no ordinary token at rank 50256 (its `<|endoftext|>`): `build.rs` lists it in `missing_ranks` and gives it empty bytes; `ORDINARY_ID_END` (not `TOKEN_COUNT`) bounds ordinary IDs.
-- `SPECIAL_TOKENS` stay sorted by ID, each `<|`…`|>` with no inner `|>` (compile-time asserted): lookup relies on it.
-- `encode_ordinary_into` appends; preserve existing output.
-- Invalid token IDs return `None`; `decode` also rejects invalid UTF-8.
-- Keep counting independent of emitting token IDs; keep `harness` out of consumer API promises.
+- Ordinary encoding treats special-token spellings as ordinary text. `encode_ordinary_into` appends; preserve existing output.
+- `encode_allowing_special` recognizes only allowed specials; others remain ordinary text. Unknown names in the allowed list are ignored.
+- `encode` and `count` reject the leftmost disallowed special and report its byte offset.
+- Invalid token IDs return `None` from `token_bytes` and `decode_bytes`; `decode` also rejects invalid UTF-8.
+- Special IDs: o200k 199999/200018; harmony 199998–201087 (named and reserved, generated by `build.rs`); cl100k 100257–100260/100276; r50k/p50k 50256; p50k_edit also 50281–50283.
+- `SPECIAL_TOKENS` stay sorted by ID, each spelling `<|`…`|>` with no inner `|>` (compile-time asserted); lookup relies on these properties.
+- `p50k_base` has no ordinary token at rank 50256: `build.rs` lists it in `missing_ranks` and gives it empty bytes. `ORDINARY_ID_END`, not `TOKEN_COUNT`, bounds ordinary IDs.
+- Keep counting independent of emitting token IDs. `harness` settings are process-wide and single-threaded; its instrumentation is not a consumer stability promise.
 
 ## Encoding invariants
-- Preserve scanner alternative ordering, backtracking, Unicode behavior, and long-s U+017F case folding.
+- Preserve scanner alternative ordering, backtracking, Unicode behavior, and long-s U+017F case folding; r50k/p50k contractions are case-sensitive.
 - BPE selects the lowest-rank adjacent pair with leftmost tie-breaking; rank equals token ID.
 - Pieces up to 128 bytes use stack merging and whole-token lookup.
-- Larger pieces use overlapping windows from 128 to 4096 bytes, then whole-piece fallback (tournament-tree merge, 20 bytes per piece byte).
+- Larger pieces use overlapping windows from 128 to 4096 bytes, then whole-piece fallback using a tournament tree.
+- Fallback uses 20 bytes per piece byte with `u32` indices, or 32 bytes per byte with `usize` indices for pieces of 4 GiB or more on 64-bit targets.
 - Cache matches require full-byte equality, not hash equality alone.
-- A failed window pass may have appended output: roll back only the current piece before fallback.
-- Reset the current piece's count before fallback; preserve earlier pieces' output and counts.
+- A failed window pass may have appended output: roll back only the current piece before fallback. Reset its count before fallback; preserve earlier pieces' output and counts.
 - Keep premerged two-/three-byte character optimizations coupled to build/runtime neighbor guards.
 
 ## Generated data and portability
-- Keep library and build script dependency-free; isolate benchmark dependencies in `bench/`.
-- Edit the Unicode generator, not `src/unicode_classes.rs`; preserve scanner class-bit layout.
-- Unicode 16 generation pins `regex` 1.12.4 and `regex-syntax` 0.8.11 to match `tiktoken-rs` 0.12.0.
-- Generator writes `src/unicode_classes.rs` relative to its manifest, not the working directory.
+- Edit the Unicode generator, not `src/unicode_classes.rs`; regenerate only for intentional Unicode-table changes. Preserve the scanner class-bit layout.
+- Unicode 16 generation pins `regex` 1.12.4 and `regex-syntax` 0.8.11 to match `tiktoken-rs` 0.12.0. Generator output resolves relative to its manifest, not the working directory.
 - `build.rs` emits Rust/binary tables under `OUT_DIR`; do not hand-edit generated outputs.
-- Keep build-time and runtime hash geometry synchronized.
-- Preserve typed-blob safety assertions, 64-byte alignment, and `CARGO_CFG_TARGET_ENDIAN` handling.
-- Preserve 32-bit and big-endian support; expected ordinary-token/pair counts are o200k 199998/446189, cl100k 100256/233378, r50k 50256/108299, p50k 50280/108599.
-- `bench` asserts exact tiktoken-rs IDs for every encoding before timing; run it after scanner or merge changes.
-- Preserve vocabulary, scanner, and Unicode attribution in `NOTICE` and package license metadata.
+- Keep build-time and runtime hash geometry synchronized. Preserve typed-blob safety assertions, 64-byte alignment, and `CARGO_CFG_TARGET_ENDIAN` handling.
+- Preserve 32-bit and big-endian support. Expected ordinary-token/pair counts:
 
-## Benchmark interpretation
-- `MAGI_TOKENIZER_SOURCE` is a platform-separated path list; default corpus comes from this repository.
-- Corpus collection includes Markdown, so edits to this file affect default measurements; fix corpus inputs for comparisons.
-- `MAGI_TOKENIZER_ASSETS` optionally supplies `o200k_base-200k.txt` and `session-compacted-500.json`.
-- Unset assets skip those workloads; a configured directory with missing/malformed assets fails.
-- Private fixtures are not committed; published ARM64 macOS results are not universally reproducible.
+| Encoding | Ordinary tokens | Pairs |
+| --- | ---: | ---: |
+| o200k | 199998 | 446189 |
+| cl100k | 100256 | 233378 |
+| r50k | 50256 | 108299 |
+| p50k | 50280 | 108599 |
+
+- Preserve vocabulary, scanner, and Unicode attribution in `NOTICE` and package license metadata (`Apache-2.0 AND MIT AND Unicode-3.0`).
+
+## Benchmarks and releases
+- `MAGI_TOKENIZER_SOURCE` is a platform-separated path list; the default corpus comes from this repository. Collection includes Markdown, so edits to this guide affect measurements; fix corpus inputs for comparisons.
+- `MAGI_TOKENIZER_ASSETS` optionally supplies `o200k_base-200k.txt` and `session-compacted-500.json`. Unset assets skip those workloads; a configured directory with missing/malformed assets fails.
+- Before publishing, run the full unfiltered release benchmark with assets on the release commit. Output must include `fixture_200k` and `session_snapshots` for every encoding; record the pass and commit in `CHANGELOG.md`.
+- Never commit or publish private transcripts. Published ARM64 macOS results are not universally reproducible.
+- Changing the reference, Unicode version, vocabulary, minimum Rust version, or public API incompatibly requires a new minor version.
+- Fixing compatibility mismatches is a patch release with a `CHANGELOG.md` “Fixed” entry. Speed and harness behavior are not guaranteed.
